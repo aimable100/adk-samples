@@ -26,5 +26,7 @@ tags:
   - "delegation"
   - "prompt-injection"
   - "plugin"
+  - "receipts"
+  - "approval-gate"
 
 license: "Apache-2.0"

@@ -55,10 +55,23 @@ ROLE_SERVICE_PATTERN = "web-*"
 TICKET_TTL_SECONDS = 600
 TICKET_REPLICA_MIN = 1.0
 TICKET_REPLICA_MAX = 4.0
+# Scaling to this many replicas or more is inside the role, but only with a
+# signed approval from the SRE lead. The ticket stays below it.
+APPROVAL_REPLICA_MIN = 5.0
+SRE_LEAD = "sre-lead"
 
 
-def mint_role(platform_key: SigningKey, coordinator_key: SigningKey) -> Warrant:
-    """Standing on-call role, minted by the platform to the coordinator."""
+def mint_role(
+    platform_key: SigningKey,
+    coordinator_key: SigningKey,
+    approver_keys: list,
+) -> Warrant:
+    """Standing on-call role, minted by the platform to the coordinator.
+
+    `scale_service` above `APPROVAL_REPLICA_MIN` is gated: the call also
+    needs a signed approval from one of `approver_keys`. The gate travels
+    with the warrant and is inherited by every ticket granted from it.
+    """
     return (
         Warrant.mint_builder()
         .capability("read_logs", service=Pattern("*"))
@@ -72,6 +85,15 @@ def mint_role(platform_key: SigningKey, coordinator_key: SigningKey) -> Warrant:
         .capability(
             "transfer_to_agent", agent_name=OneOf([REMEDIATION_AGENT_NAME])
         )
+        .approval_gates(
+            {
+                "scale_service": {
+                    "replicas": Range(APPROVAL_REPLICA_MIN, ROLE_REPLICA_MAX)
+                }
+            }
+        )
+        .required_approvers(approver_keys)
+        .min_approvals(1)
         .holder(coordinator_key.public_key)
         .ttl(ROLE_TTL_SECONDS)
         .mint(platform_key)
@@ -114,6 +136,9 @@ class OnCallAuthority:
     trusted_roots: list
     keys: dict[str, SigningKey]
     role: Warrant
+    # The approver's key. In a deployment it lives with the approver, not
+    # with any agent; it is here so the recipe can demonstrate the gate.
+    approvers: dict[str, SigningKey] = field(default_factory=dict)
     _tickets: dict[str, Warrant] = field(default_factory=dict)
 
     def key_for(self, agent_name: str) -> SigningKey:
@@ -157,8 +182,9 @@ def provision() -> OnCallAuthority:
     platform_key = SigningKey.generate()
     coordinator_key = SigningKey.generate()
     remediation_key = SigningKey.generate()
+    sre_lead_key = SigningKey.generate()
 
-    role = mint_role(platform_key, coordinator_key)
+    role = mint_role(platform_key, coordinator_key, [sre_lead_key.public_key])
     trusted_roots = [platform_key.public_key]
     del platform_key
 
@@ -169,4 +195,5 @@ def provision() -> OnCallAuthority:
             REMEDIATION_AGENT_NAME: remediation_key,
         },
         role=role,
+        approvers={SRE_LEAD: sre_lead_key},
     )

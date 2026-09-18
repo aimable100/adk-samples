@@ -1,7 +1,8 @@
 # Grant the ticket at hand-off; verify it at the fleet
 
 An on-call `coordinator` holds a standing role: read logs, scale or
-restart `web-*` between one and ten replicas, page, hand off. A
+restart `web-*` between one and ten replicas (five or more only with
+the SRE lead's signed approval), page, hand off. A
 production alert arrives for `web-checkout`. The coordinator confirms
 the symptom and calls `transfer_to_agent`. **That call is when the
 ticket is minted** — from the alert record, to the `remediation_agent`'s
@@ -30,7 +31,7 @@ share one interpreter:
 | Side | Object | Holds | Does |
 |---|---|---|---|
 | Holder | `InvocationPlugin` | per-agent signing keys, the role | signs the exact tool arguments; grants the ticket at `transfer_to_agent` from the alert |
-| Resource | `FleetGateway` | platform public key, the fleet | `check_chain(chain, tool, args, signature)` then mutates |
+| Resource | `FleetGateway` | platform public key, its own receipt key, the fleet | `check_chain(chain, tool, args, signature)` then mutates; signs a receipt for every decision |
 
 The gateway constructor takes trusted roots and nothing else. It never
 sees a signing key. If the plugin is left off, the tools still run;
@@ -105,8 +106,8 @@ warnings on stderr first; they are expected.
     Alert ALR-2291 (P2): web-checkout p99 latency 4.8s over 5m (threshold 1.5s). Service: web-checkout.
 
 2. standing role (no ticket yet)
-    coordinator role: key 1bbad0211eb8..
-      ttl 3600s, holder PublicKey(1bbad021...)
+    coordinator role: key 02b7ca405389..
+      ttl 3600s, holder PublicKey(02b7ca40...)
       page_oncall(reason=Wildcard())
       read_logs(service=Pattern('*'))
       restart_service(service=Pattern('web-*'))
@@ -115,10 +116,11 @@ warnings on stderr first; they are expected.
     remediation_agent: no ticket (granted at transfer_to_agent, from the alert record)
 
 3. ticket granted at hand-off
-    remediation ticket: key 5d1098c3782a..
-      ttl 600s, holder PublicKey(5d1098c3...)
+    remediation ticket: key 7dccb92186ed..
+      ttl 600s, holder PublicKey(7dccb921...)
       read_logs(service=Exact('web-checkout'))
       scale_service(replicas=Range(min=1.0, max=4.0), service=Exact('web-checkout'))
+      delegation receipt: DelegationReceipt(parent='tnu_wrt_01a0b69fa1ed75318104b8aa68ed3f38', child='tnu_wrt_01a0b69fa25e7a62abd92343d5647a3a')
 
 4. hand-off record
     [coordinator] ok     transfer_to_agent({'agent_name': 'remediation_agent'})
@@ -146,17 +148,50 @@ warnings on stderr first; they are expected.
 9. a warrant minted by a key the platform never issued
     UntrustedRoot: Root warrant issuer is not trusted
 
+10. receipts: one signed record per gateway decision
+    6 receipts, all signed by gateway key 357a68cc8108..: ['allow:ok', 'allow:ok', 'allow:ok', 'deny:constraint_violation', 'deny:constraint_violation', 'deny:tool_not_authorized']
+    tampered receipt -> ValidationError: Validation error: AttributeError: module 'tenuo.exceptions' has no attribute 'InvalidReceipt'
+
+11. above the ticket: the role allows it only with an approval
+    coordinator asks for 6 -> ApprovalGateTriggered: Approval required for tool 'scale_service'
+    with sre-lead's signed approval -> {'service': 'web-checkout', 'replicas': 6, 'previous': 3}
+    a stranger's approval -> InvalidApproval: Invalid approval: approver not in trusted set
+
 RESULT: OK
 ```
 
 Sections 7 to 9 run against the same `Authorizer` the gateway uses. They
 cover a copied chain, a widened grant, and an issuer the platform
-never trusted.
+never trusted. Sections 10 and 11 cover the receipts and the approval
+gate; see below.
 
 A live model may or may not follow the injected line. The gateway's
 answer is the same either way. Replica values must be the type the
 warrant signed: `"3"` and `3` are different, and this plugin does not
 coerce them.
+
+## Evidence
+
+The gateway signs a receipt for every decision, allow or deny, with a
+key of its own, and keeps the wire form. `tenuo_core.verify_receipt`
+checks one later against the gateway's public key alone: no gateway,
+no agent, no network. Section 10 of the demo verifies all six from the
+run and shows that a receipt with eight characters changed does not
+verify. A ticket also carries a delegation receipt naming the parent
+it was narrowed from (section 3).
+
+## Above the ticket
+
+The role permits `scale_service` up to ten replicas, but five or more
+is an **approval gate** on the warrant: the call needs a signed
+approval from the SRE lead's key as well. The ticket stays at one to
+four, so the remediation agent never meets the gate; anything it asks
+for above four is refused by the ticket, not held for approval. The
+gate travels with the warrant and is inherited by every ticket
+granted from the role. Section 11 shows the coordinator asking for
+six: the gateway refuses with `ApprovalGateTriggered`, the SRE lead
+signs an approval bound to that exact request hash, the same call
+then executes, and an approval signed by anyone else is rejected.
 
 ## Trust boundary
 
@@ -194,11 +229,11 @@ process; `FleetGateway.invoke` is the verification path you run there.
 |---|---|
 | `app/authority.py` | Standing role, per-agent keys, `issue_ticket` at hand-off |
 | `app/plugin.py` | Sign invocations; grant the ticket on `transfer_to_agent` |
-| `app/gateway.py` | `Authorizer` + fleet; the only mutation path |
+| `app/gateway.py` | `Authorizer` + fleet; the only mutation path; signs receipts |
 | `app/tools.py` | Thin wrappers that present the proof to the gateway |
 | `app/alert.py` | The trusted alert record the ticket is granted from |
 | `app/agent.py` | The agent tree and `build_app()` |
-| `demo.py` | Scripted-model run and the three out-of-band checks |
+| `demo.py` | Scripted-model run, the three out-of-band checks, receipts, the approval gate |
 
 ## Adapting it
 

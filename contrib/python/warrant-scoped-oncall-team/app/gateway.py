@@ -28,11 +28,14 @@ copy into a separate service.
 
 from __future__ import annotations
 
+import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from tenuo import Authorizer
+from tenuo import Authorizer, SigningKey
 from tenuo.exceptions import TenuoError
+from tenuo_core import ReceiptIssuer
 
 DENIED = "authority_denied"
 
@@ -120,12 +123,21 @@ class FleetGateway:
 
     trusted_roots: list
     decisions: list[Decision] = field(default_factory=list)
+    # Every decision, allow or deny, is signed by the gateway's own key and
+    # kept in wire form. Anyone holding `receipt_public_key` can verify one
+    # later with `tenuo_core.verify_receipt`, with no gateway in the loop.
+    receipts: list[str] = field(default_factory=list)
+    _receipt_key: SigningKey = field(init=False, repr=False)
+    _issuer: ReceiptIssuer = field(init=False, repr=False)
     _authorizer: Authorizer = field(init=False, repr=False)
     _fleet: dict[str, int] = field(init=False, repr=False)
     _logs: dict[str, list[str]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._authorizer = Authorizer(trusted_roots=self.trusted_roots)
+        self._receipt_key = SigningKey.generate()
+        self._issuer = ReceiptIssuer(self._receipt_key)
+        self._issuer.bind_authorizer(self._authorizer)
         self._fleet = dict(_DEFAULT_FLEET)
         self._logs = {
             name: list(lines) for name, lines in _DEFAULT_LOGS.items()
@@ -135,13 +147,23 @@ class FleetGateway:
     def fleet(self) -> dict[str, int]:
         return dict(self._fleet)
 
+    @property
+    def receipt_public_key(self):
+        """The key receipts are verified against. Publish this, not the private half."""
+        return self._receipt_key.public_key
+
     def invoke(
         self,
         tool: str,
         args: dict[str, Any],
         invocation: SignedInvocation | None,
+        approvals: list | None = None,
     ) -> dict[str, Any]:
-        """Verify, then execute. No proof, or a proof of different args, is a deny."""
+        """Verify, then execute. No proof, or a proof of different args, is a deny.
+
+        `approvals` are signed approvals for a gated call; they are checked
+        against the approvers the warrant names, not against anything here.
+        """
         args = dict(args)
         agent = invocation.agent if invocation is not None else ""
         if invocation is None:
@@ -160,15 +182,34 @@ class FleetGateway:
                 "InvocationMismatch",
                 "signed arguments do not match the arguments the tool received",
             )
+        now = int(time.time())
+        request_id = uuid.uuid4().hex
         try:
-            self._authorizer.check_chain(
-                invocation.chain, tool, args, invocation.signature
+            verified = self._authorizer.check_chain(
+                invocation.chain,
+                tool,
+                args,
+                invocation.signature,
+                approvals=approvals,
             )
         except TenuoError as exc:
+            self.receipts.append(
+                self._issuer.issue_denial_receipt(
+                    invocation.chain,
+                    tool,
+                    args,
+                    now,
+                    request_id,
+                    getattr(exc, "error_code", None) or type(exc).__name__,
+                )
+            )
             return self._deny(
                 invocation.agent, tool, args, type(exc).__name__, str(exc)
             )
 
+        self.receipts.append(
+            self._issuer.issue_receipt(verified, tool, True, now, request_id)
+        )
         result = self._execute(tool, args)
         self.decisions.append(
             Decision(invocation.agent, tool, args, True, "ok")

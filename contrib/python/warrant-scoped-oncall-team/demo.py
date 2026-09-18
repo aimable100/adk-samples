@@ -46,6 +46,7 @@ from google.adk.sessions.in_memory_session_service import (
 from google.genai import types
 from pydantic import Field
 from tenuo import (
+    ApprovalRequest,
     Authorizer,
     Exact,
     Pattern,
@@ -54,12 +55,17 @@ from tenuo import (
     Warrant,
     decode_warrant_stack_base64,
     encode_warrant_stack,
+    sign_approval,
 )
 from tenuo.exceptions import (
+    ApprovalGateTriggered,
+    InvalidApproval,
     MonotonicityError,
     SignatureInvalid,
     UntrustedRoot,
+    ValidationError,
 )
+from tenuo_core import verify_receipt
 
 from app import alert, authority
 from app.agent import REMEDIATION_AGENT_NAME, ROOT_AGENT_NAME, build_app
@@ -250,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
             team.key_for(REMEDIATION_AGENT_NAME).public_key_bytes()
         ).hex()
         _print_warrant("remediation ticket", tickets[-1], rem_hex)
+        print(f"      delegation receipt: {tickets[-1].delegation_receipt}")
     else:
         print("    (no ticket was granted)")
 
@@ -353,6 +360,71 @@ def main(argv: list[str] | None = None) -> int:
         forged_ok = True
         print(f"    {type(exc).__name__}: {exc}")
 
+    print("\n10. receipts: one signed record per gateway decision")
+    gateway_key_hex = bytes(gateway.receipt_public_key.to_bytes()).hex()
+    outcomes = []
+    receipts_ok = bool(gateway.receipts)
+    for wire in gateway.receipts:
+        payload = verify_receipt(wire)
+        signer = payload.signer_key
+        signer_hex = signer if isinstance(signer, str) else bytes(signer).hex()
+        receipts_ok = receipts_ok and signer_hex == gateway_key_hex
+        outcomes.append(f"{payload.outcome}:{payload.decision_code or 'ok'}")
+    print(
+        f"    {len(gateway.receipts)} receipts, all signed by gateway key "
+        f"{gateway_key_hex[:12]}..: {outcomes}"
+    )
+    tampered = gateway.receipts[0][:-8] + "AAAAAAAA"
+    try:
+        verify_receipt(tampered)
+        receipts_ok = False
+        print("    tampered receipt verified (unexpected)")
+    except ValidationError as exc:
+        print(f"    tampered receipt -> {type(exc).__name__}: {exc}")
+
+    print("\n11. above the ticket: the role allows it only with an approval")
+    approval_ok = False
+    coordinator_key = team.key_for(ROOT_AGENT_NAME)
+    big = {"service": service, "replicas": 6}
+    role_sig = team.role.sign(coordinator_key, "scale_service", big, now)
+    try:
+        authorizer.check_chain([team.role], "scale_service", big, role_sig)
+        print("    ALLOWED without approval (unexpected)")
+    except ApprovalGateTriggered as exc:
+        print(f"    coordinator asks for 6 -> {type(exc).__name__}: {exc}")
+        request = ApprovalRequest(
+            tool="scale_service",
+            arguments=big,
+            warrant_id=team.role.id,
+            request_hash=bytes.fromhex(exc.request_hash),
+            required_approvers=[k.public_key for k in team.approvers.values()],
+            min_approvals=exc.min_approvals,
+        )
+        lead = team.approvers[authority.SRE_LEAD]
+        approved = sign_approval(request, lead, external_id=authority.SRE_LEAD)
+        result = gateway.invoke(
+            "scale_service",
+            big,
+            plugin.sign(ROOT_AGENT_NAME, "scale_service", big, None),
+            approvals=[approved],
+        )
+        print(f"    with {authority.SRE_LEAD}'s signed approval -> {result}")
+        stranger = sign_approval(
+            request, SigningKey.generate(), external_id="x"
+        )
+        try:
+            authorizer.check_chain(
+                [team.role],
+                "scale_service",
+                big,
+                role_sig,
+                approvals=[stranger],
+            )
+            print("    stranger's approval accepted (unexpected)")
+        except InvalidApproval as exc2:
+            approval_ok = result.get("replicas") == 6
+            print(f"    a stranger's approval -> {type(exc2).__name__}: {exc2}")
+
     ok = (
         scripted_ok
         and fleet_ok
@@ -360,6 +432,8 @@ def main(argv: list[str] | None = None) -> int:
         and replay_ok
         and widen_ok
         and forged_ok
+        and receipts_ok
+        and approval_ok
         and all(not c.denied for c in calls if c.tool == "read_logs")
     )
     print("\nRESULT:", "OK" if ok else "FAILED")

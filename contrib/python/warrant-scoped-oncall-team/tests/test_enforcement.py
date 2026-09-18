@@ -19,20 +19,27 @@ from types import SimpleNamespace
 
 import pytest
 from tenuo import (
+    ApprovalRequest,
     Authorizer,
     Exact,
     Pattern,
     Range,
     SigningKey,
     Warrant,
+    approval_requirement,
     decode_warrant_stack_base64,
     encode_warrant_stack,
+    sign_approval,
 )
 from tenuo.exceptions import (
+    ApprovalGateTriggered,
+    InvalidApproval,
     MonotonicityError,
     SignatureInvalid,
     UntrustedRoot,
+    ValidationError,
 )
+from tenuo_core import verify_receipt
 
 import demo
 from app import alert, authority, tools
@@ -289,6 +296,87 @@ def test_a_warrant_from_an_unknown_issuer_is_refused(team):
         Authorizer(trusted_roots=team.trusted_roots).check_chain(
             [forged], "restart_service", args, signature
         )
+
+
+def test_every_gateway_decision_has_a_verifiable_receipt(run):
+    _calls, _team, _plugin, gateway = run
+    assert len(gateway.receipts) == len(gateway.decisions)
+    key_hex = bytes(gateway.receipt_public_key.to_bytes()).hex()
+    outcomes = []
+    for wire, decision in zip(gateway.receipts, gateway.decisions, strict=True):
+        payload = verify_receipt(wire)
+        signer = payload.signer_key
+        assert (
+            signer if isinstance(signer, str) else bytes(signer).hex()
+        ) == key_hex
+        outcomes.append(payload.outcome)
+        assert (payload.outcome == "allow") == decision.allowed
+    assert "deny" in outcomes and "allow" in outcomes
+
+
+def test_a_tampered_receipt_does_not_verify(run):
+    _calls, _team, _plugin, gateway = run
+    with pytest.raises(ValidationError):
+        verify_receipt(gateway.receipts[0][:-8] + "AAAAAAAA")
+
+
+def test_ticket_calls_are_never_gated_and_role_calls_above_four_are(team):
+    ticket = team.issue_ticket(SERVICE, "s")[-1]
+    small = {"service": SERVICE, "replicas": 3}
+    big = {"service": SERVICE, "replicas": 6}
+    assert (
+        approval_requirement(ticket, "scale_service", small).status
+        == "not_gated"
+    )
+    assert (
+        approval_requirement(team.role, "scale_service", small).status
+        == "not_gated"
+    )
+    assert (
+        approval_requirement(team.role, "scale_service", big).status
+        == "required"
+    )
+
+
+def test_above_the_ticket_needs_the_named_approver(team):
+    gateway = FleetGateway(trusted_roots=team.trusted_roots)
+    plugin = InvocationPlugin(team, alert.ALERT)
+    big = {"service": SERVICE, "replicas": 6}
+    proof = plugin.sign(ROOT_AGENT_NAME, "scale_service", big, None)
+    refused = gateway.invoke("scale_service", big, proof)
+    assert refused["reason"] == "ApprovalGateTriggered"
+    assert gateway.fleet[SERVICE] == 2
+
+    authorizer = Authorizer(trusted_roots=team.trusted_roots)
+    with pytest.raises(ApprovalGateTriggered) as info:
+        authorizer.check_chain(
+            [team.role], "scale_service", big, proof.signature
+        )
+    request = ApprovalRequest(
+        tool="scale_service",
+        arguments=big,
+        warrant_id=team.role.id,
+        request_hash=bytes.fromhex(info.value.request_hash),
+        required_approvers=[k.public_key for k in team.approvers.values()],
+        min_approvals=info.value.min_approvals,
+    )
+    stranger = sign_approval(request, SigningKey.generate(), external_id="x")
+    with pytest.raises(InvalidApproval):
+        authorizer.check_chain(
+            [team.role],
+            "scale_service",
+            big,
+            proof.signature,
+            approvals=[stranger],
+        )
+    lead = sign_approval(
+        request,
+        team.approvers[authority.SRE_LEAD],
+        external_id=authority.SRE_LEAD,
+    )
+    proof = plugin.sign(ROOT_AGENT_NAME, "scale_service", big, None)
+    done = gateway.invoke("scale_service", big, proof, approvals=[lead])
+    assert done["replicas"] == 6 and gateway.fleet[SERVICE] == 6
 
 
 def test_the_demo_exits_zero(capsys):
