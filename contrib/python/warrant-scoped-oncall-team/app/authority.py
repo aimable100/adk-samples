@@ -12,24 +12,17 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""Standing on-call authority, and the per-alert ticket granted from it.
+"""The standing on-call role and the per-alert ticket granted from it.
 
-Two different moments, two different keys:
+Provisioning: a platform key mints the role warrant to the coordinator's
+key, then the platform private key is discarded. The gateway keeps only
+the public root.
 
-1. Provision. A platform key mints a ROLE warrant to the coordinator.
-   That is standing eligibility for the shift: read logs, scale or
-   restart `web-*` between one and ten replicas, page, hand off. After
-   minting, the platform private key is discarded. The fleet gateway
-   keeps only the public root.
-
-2. Hand-off. When the coordinator transfers an alert, it grants a
-   TICKET from the role to the remediation agent's own key. The service
-   name and replica ceiling come from the alert record, never from the
-   model. The library refuses the grant if the ticket would hold
-   anything the role does not (`MonotonicityError`).
-
-The ticket does not exist until that grant. A remediation call that
-arrives before hand-off has no chain to present.
+Hand-off: the coordinator grants a ticket from the role to the
+remediation agent's key. Service name and replica ceiling come from the
+alert record. A ticket that holds anything the role does not is refused
+with `MonotonicityError`. Until the grant, the remediation agent has no
+chain to present.
 """
 
 from dataclasses import dataclass, field
@@ -55,8 +48,8 @@ ROLE_SERVICE_PATTERN = "web-*"
 TICKET_TTL_SECONDS = 600
 TICKET_REPLICA_MIN = 1.0
 TICKET_REPLICA_MAX = 4.0
-# Scaling to this many replicas or more is inside the role, but only with a
-# signed approval from the SRE lead. The ticket stays below it.
+# Scaling to this many replicas or more needs the SRE lead's signed
+# approval. Tickets stay below it.
 APPROVAL_REPLICA_MIN = 5.0
 SRE_LEAD = "sre-lead"
 
@@ -66,11 +59,11 @@ def mint_role(
     coordinator_key: SigningKey,
     approver_keys: list,
 ) -> Warrant:
-    """Standing on-call role, minted by the platform to the coordinator.
+    """The standing on-call role, minted by the platform to the coordinator.
 
-    `scale_service` above `APPROVAL_REPLICA_MIN` is gated: the call also
-    needs a signed approval from one of `approver_keys`. The gate travels
-    with the warrant and is inherited by every ticket granted from it.
+    `scale_service` at `APPROVAL_REPLICA_MIN` or above also needs a signed
+    approval from one of `approver_keys`. The gate is part of the warrant
+    and is inherited by every ticket granted from it.
     """
     return (
         Warrant.mint_builder()
@@ -127,17 +120,16 @@ def grant_ticket(
 
 @dataclass
 class OnCallAuthority:
-    """Holder-side material: the role, per-agent keys, and the public root.
+    """Holder-side material: the role, per-agent keys, the public root.
 
-    The platform private key is not here. The gateway never receives
-    these signing keys; it is constructed with `trusted_roots` only.
+    The platform private key is not here, and the gateway never sees
+    these signing keys.
     """
 
     trusted_roots: list
     keys: dict[str, SigningKey]
     role: Warrant
-    # The approver's key. In a deployment it lives with the approver, not
-    # with any agent; it is here so the recipe can demonstrate the gate.
+    # The approver's key. In a deployment it lives with the approver.
     approvers: dict[str, SigningKey] = field(default_factory=dict)
     _tickets: dict[str, Warrant] = field(default_factory=dict)
 
@@ -174,9 +166,9 @@ class OnCallAuthority:
 def provision() -> OnCallAuthority:
     """Mint the standing role. No ticket is granted here.
 
-    Keys are generated so the recipe runs by itself. In a deployment the
-    platform key lives with whatever provisions agents, each agent
-    process holds only its own key, and the gateway is given the
+    Keys are generated in one place so the recipe runs by itself. In a
+    deployment the platform key lives with whatever provisions agents,
+    each agent process holds its own key, and the gateway is given the
     platform public key.
     """
     platform_key = SigningKey.generate()

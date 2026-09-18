@@ -12,11 +12,10 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""Instructions for the two agents. These describe the job, not the grant.
+"""Instructions for the two agents. They describe the job, not the grant.
 
-The ticket is issued from the alert record at hand-off. The gateway
-checks that ticket. A model that ignores these instructions still
-cannot scale `db-primary` or restart `web-payments`.
+A model that ignores them still cannot scale `db-primary` or restart
+`web-payments`; the ticket decides that, at the gateway.
 """
 
 COORDINATOR_PROMPT = """

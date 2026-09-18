@@ -12,19 +12,17 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""Holder-side ADK glue: sign invocations, grant the ticket at hand-off.
+"""Holder side: sign each fleet call, grant the ticket at hand-off.
 
-`InvocationPlugin` is not the effect boundary. For fleet tools it signs
-the exact arguments ADK is about to pass and registers the proof under
-the call's ``function_call_id``; the tool body takes that proof, once,
-and presents it to `FleetGateway`. If this plugin is missing, the
-gateway sees no proof and refuses. A proof is never written to session
-state, so it cannot be replayed by a later call.
+For fleet tools the plugin signs the exact arguments ADK is about to
+pass and registers the proof under the call's ``function_call_id``. The
+tool body takes the proof once and presents it to `FleetGateway`. Proofs
+never touch session state.
 
-Hand-off is different. `transfer_to_agent` is an ADK framework tool, so
-the plugin is the only place that can both authorize the transfer and
-grant the ticket. The service name is taken from the alert record
-passed into this plugin, not from the model's transfer arguments.
+`transfer_to_agent` is an ADK framework tool, so the plugin authorizes
+the transfer against the role and grants the ticket in the same
+callback. The service name comes from the alert record, not from the
+model's transfer arguments.
 """
 
 from __future__ import annotations
@@ -41,8 +39,7 @@ from tenuo.exceptions import TenuoError
 from .authority import REMEDIATION_AGENT_NAME, OnCallAuthority
 from .gateway import DENIED, Decision, ProofRegistry, SignedInvocation
 
-# The ticket is the one thing that legitimately persists across calls, so
-# it lives in session state as a base64 chain. Proofs do not.
+# The ticket persists for the session, as a base64 chain in state.
 TICKET_STACK_KEY = "__tenuo_ticket_stack__"
 
 
@@ -151,8 +148,7 @@ class InvocationPlugin(BasePlugin):
         tool_context: ToolContext,
         result: dict[str, Any],
     ) -> dict[str, Any] | None:
-        # The tool body took its proof on the way to the gateway. If it did
-        # not (the body was never entered), nothing must be left behind.
+        # Drop any proof the tool body did not take.
         self.proofs.discard(getattr(tool_context, "function_call_id", None))
         return None
 

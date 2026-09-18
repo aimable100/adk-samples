@@ -12,7 +12,7 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""The production claims, asserted. Offline: no API key, no network."""
+"""The recipe's claims, asserted. Offline: no API key, no network."""
 
 import time
 from types import SimpleNamespace
@@ -175,8 +175,7 @@ def test_remediation_cannot_hand_the_alert_on(team):
     )
     assert refusal is not None
     assert refusal["reason"] == "ToolNotAuthorized"
-    # ticket already existed from issue_ticket above; a refused transfer
-    # must not mint a second, wider one.
+    # A refused transfer must not mint a second ticket.
     assert "restart_service" not in team.ticket_for("s").tools
 
 

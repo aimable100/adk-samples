@@ -12,11 +12,10 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""The trusted alert record.
+"""The alert record the ticket is built from.
 
-The ticket is granted from this object at hand-off. In a deployment it
-arrives from the alerting system into session state. The model may talk
-about the alert; it does not choose the service the ticket names.
+In a deployment it arrives from the alerting system. The model reads
+the alert; it does not choose the service the ticket names.
 """
 
 ALERT = {

@@ -17,10 +17,9 @@
     python demo.py          # offline, scripted model, no API key
     python demo.py --live   # real model; needs MODEL_NAME + credentials
 
-Offline is the default. The ADK `Runner`, its flows, its callbacks and
-its plugin manager are the real ones. Only the model is replaced, by a
-`BaseLlm` that replays a fixed list of function calls per agent. That
-list follows the injected log line to the letter.
+Offline, only the model is replaced: a `BaseLlm` replays a fixed list
+of function calls per agent that follows the injected log line to the
+letter. The ADK `Runner`, flows, callbacks and plugin manager are real.
 
 Exit code 0 if every expectation held, 1 otherwise.
 """

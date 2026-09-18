@@ -12,15 +12,14 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""Thin ADK wrappers. Every body presents its proof to the gateway.
+"""ADK tool wrappers. Each body presents its proof to the gateway.
 
-The functions themselves do not decide who may call them. They take the
-arguments ADK passed in, take the proof the plugin registered for this
-call (once; a proof cannot be presented twice), and hand both to
-`FleetGateway.invoke`. A missing plugin, a missing ticket, or a proof of
-different arguments all fail closed there, before the fleet changes.
+The wrappers take the arguments ADK passed in, take the proof the plugin
+registered for this call, and hand both to `FleetGateway.invoke`. A
+missing plugin, a missing ticket, or a proof of other arguments fails
+closed there.
 
-`tool_context` is injected by ADK and is not a model-visible argument.
+`tool_context` is injected by ADK and is not visible to the model.
 """
 
 from __future__ import annotations
@@ -36,10 +35,10 @@ _proofs: ProofRegistry | None = None
 
 
 def bind(gateway: FleetGateway, proofs: ProofRegistry) -> None:
-    """Point the wrappers at the gateway and proof registry for this App.
+    """Bind the wrappers to this App's gateway and proof registry.
 
-    Module-level on purpose: ADK tools are plain functions. Two Apps in one
-    process share whichever pair was bound last.
+    ADK tools are plain functions, so the binding is module-level. Two
+    Apps in one process share the pair bound last.
     """
     global _gateway, _proofs
     _gateway = gateway

@@ -12,16 +12,14 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""Coordinator + remediation agent, with holder-side signing and a fleet gateway.
+"""The agent tree, the holder plugin, and the fleet gateway.
 
-The coordinator is provisioned with the standing on-call role. The
-remediation agent starts with no ticket. `InvocationPlugin` grants that
-ticket at `transfer_to_agent` from the alert record, then signs each
-fleet call. `FleetGateway` is the only object that mutates the fleet,
-and it is constructed with the platform public key alone.
-
-If the plugin is left off, tools still run and the gateway refuses
-every call: there is no signed invocation to present.
+The coordinator holds the standing on-call role. The remediation agent
+starts with nothing; `InvocationPlugin` grants its ticket at
+`transfer_to_agent` from the alert record and signs each fleet call.
+`FleetGateway` is constructed with the platform public key alone and is
+the only object that mutates the fleet. Without the plugin, tools
+present no proof and the gateway refuses.
 """
 
 import os
@@ -77,21 +75,11 @@ def build_app(
     return application, team, plugin, gateway
 
 
-# The module-level objects the ADK CLI looks for. `adk run` and `adk web`
-# check for `app` first and fall back to `root_agent`; exposing the App
-# is what carries the plugin into a CLI-driven run.
-#
-# They are built lazily (PEP 562). Only a CLI-driven run touches these
-# names, and that run requires MODEL_NAME (see `.env.example`); there is
-# deliberately no in-code default. `demo.py` and the tests call
-# `build_app()` with their own model, so importing this module has no
-# side effects for them.
-#
-# A CLI run builds once, on first access, so every session `adk web`
-# serves shares one standing role and one set of keys. Tickets are still
-# granted per session at hand-off, and the ticket's ten minutes start
-# then. Fine for trying the recipe out; call `build_app()` per alert
-# where that matters.
+# Module-level objects for the ADK CLI. `adk run` and `adk web` load
+# `app`, which carries the plugin. Built lazily (PEP 562) on first access
+# and only for a CLI run, which requires MODEL_NAME; `demo.py` and the
+# tests call `build_app()` with their own model. One standing role per
+# process; tickets are granted per session at hand-off.
 _cli_singletons: dict[str, Any] = {}
 
 

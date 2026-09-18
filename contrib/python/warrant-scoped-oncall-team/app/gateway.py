@@ -12,18 +12,14 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""The effect boundary: the only path that mutates the fleet.
+"""Resource side: the only path that mutates the fleet.
 
-`FleetGateway` holds the platform public key and the in-memory fleet.
-It does not hold agent signing keys. `invoke` is the only method that
-changes replica counts or returns logs. It verifies the warrant chain
-and the holder's proof-of-possession against the arguments *this*
-call received, then runs the side effect.
-
-That is the production split: the agent process signs, the resource
-process verifies. Here both objects live in one interpreter so the
-recipe runs offline; the gateway's constructor is still the shape you
-copy into a separate service.
+`FleetGateway` holds the platform public key, its own receipt key, and
+the in-memory fleet. `invoke` verifies the warrant chain and the
+holder's proof-of-possession against the arguments this call received,
+runs the side effect, and signs a receipt for the decision. In a
+deployment this object lives in the process that owns the fleet; its
+constructor takes trusted roots and nothing else.
 """
 
 from __future__ import annotations
@@ -87,7 +83,7 @@ class Decision:
     reason: str
 
 
-# Current fleet: replica counts per service.
+# Replica counts per service.
 _DEFAULT_FLEET = {
     "web-checkout": 2,
     "web-payments": 3,
@@ -95,9 +91,7 @@ _DEFAULT_FLEET = {
     "db-primary": 1,
 }
 
-# The third web-checkout line is not a real log line: it is text that
-# reached the log store and is phrased as an instruction to whoever
-# reads it.
+# The third web-checkout line is the injected instruction.
 _DEFAULT_LOGS = {
     "web-checkout": [
         "06:41:02Z ERROR checkout: upstream timeout p99=4.8s queue_depth=1900",
@@ -123,9 +117,8 @@ class FleetGateway:
 
     trusted_roots: list
     decisions: list[Decision] = field(default_factory=list)
-    # Every decision, allow or deny, is signed by the gateway's own key and
-    # kept in wire form. Anyone holding `receipt_public_key` can verify one
-    # later with `tenuo_core.verify_receipt`, with no gateway in the loop.
+    # One signed receipt per decision, in wire form. Verify later with
+    # `tenuo_core.verify_receipt` and `receipt_public_key`.
     receipts: list[str] = field(default_factory=list)
     _receipt_key: SigningKey = field(init=False, repr=False)
     _issuer: ReceiptIssuer = field(init=False, repr=False)
@@ -149,7 +142,7 @@ class FleetGateway:
 
     @property
     def receipt_public_key(self):
-        """The key receipts are verified against. Publish this, not the private half."""
+        """The key receipts are verified against."""
         return self._receipt_key.public_key
 
     def invoke(
@@ -159,10 +152,10 @@ class FleetGateway:
         invocation: SignedInvocation | None,
         approvals: list | None = None,
     ) -> dict[str, Any]:
-        """Verify, then execute. No proof, or a proof of different args, is a deny.
+        """Verify, then execute. No proof, or a proof of other args, is a deny.
 
-        `approvals` are signed approvals for a gated call; they are checked
-        against the approvers the warrant names, not against anything here.
+        `approvals` are signed approvals for a gated call, checked against
+        the approvers the warrant names.
         """
         args = dict(args)
         agent = invocation.agent if invocation is not None else ""
