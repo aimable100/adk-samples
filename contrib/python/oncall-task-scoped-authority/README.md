@@ -1,4 +1,4 @@
-# Task-scoped on-call agent team
+# Task-scoped authority for an on-call agent team
 
 An on-call coordinator triages a production alert and hands it to a
 remediation sub-agent. The logs the sub-agent reads contain a line

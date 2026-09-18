@@ -34,7 +34,7 @@ from .gateway import FleetGateway
 from .plugin import InvocationPlugin
 from .prompt import COORDINATOR_PROMPT, REMEDIATION_PROMPT
 
-APP_NAME = "task-scoped-oncall-team"
+APP_NAME = "oncall-task-scoped-authority"
 ROOT_AGENT_NAME = authority.COORDINATOR_AGENT_NAME
 REMEDIATION_AGENT_NAME = authority.REMEDIATION_AGENT_NAME
 
