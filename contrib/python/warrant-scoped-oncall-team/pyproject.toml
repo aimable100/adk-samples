@@ -1,0 +1,31 @@
+[project]
+name = "warrant-scoped-oncall-team"
+version = "0.1.0"
+description = "An SRE coordinator narrows its on-call role into a ticket scoped to one service, a replica ceiling and ten minutes, bound to the remediation sub-agent's own key; every tool call is signed by that agent and verified against the full delegation chain before the tool body runs, so injected instructions to touch other services are refused."
+license = {text = "Apache License 2.0"}
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    "google-adk>=2.9,<3",
+    "google-genai>=1.9.0",
+    "tenuo>=0.3.0,<0.4",
+    "pydantic>=2",
+    "python-dotenv>=1.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple/"
+default = true
