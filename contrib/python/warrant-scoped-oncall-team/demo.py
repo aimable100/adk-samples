@@ -380,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
         receipts_ok = False
         print("    tampered receipt verified (unexpected)")
     except ValidationError as exc:
-        print(f"    tampered receipt -> {type(exc).__name__}: {exc}")
+        print(f"    tampered receipt -> {type(exc).__name__}")
 
     print("\n11. above the ticket: the role allows it only with an approval")
     approval_ok = False
