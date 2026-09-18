@@ -1,16 +1,16 @@
-# Warrant-scoped on-call agent team
+# Task-scoped on-call agent team
 
 An on-call coordinator triages a production alert and hands it to a
 remediation sub-agent. The logs the sub-agent reads contain a line
 phrased as an instruction: scale this service to 50, scale the
-database, restart payments. The sub-agent can act on the alert it was
-given and on nothing else, whatever it reads, and every decision leaves
-a signed receipt.
+database, restart payments. The sub-agent's authority is scoped to the
+task it was handed, not to its role, so it can act on the alert and on
+nothing else, whatever it reads. Every decision leaves a signed receipt.
 
-The mechanism is a **warrant**: a signed grant of which tools may be
-called, with which argument values, by which key, until when. The
-coordinator holds one for the on-call role. At hand-off it narrows that
-role into a ticket for the sub-agent: this service, one to four
+The unit of authority is a **warrant**: a signed grant of which tools
+may be called, with which argument values, by which key, until when.
+The coordinator holds one for the on-call role. At hand-off it narrows
+that role into a ticket for the sub-agent: this service, one to four
 replicas, ten minutes, bound to the sub-agent's own key. Every tool call
 goes to a gateway that holds only the platform's public key. The
 gateway checks the chain and the signature against the arguments it
@@ -143,8 +143,8 @@ warnings on stderr first.
     Alert ALR-2291 (P2): web-checkout p99 latency 4.8s over 5m (threshold 1.5s). Service: web-checkout.
 
 2. standing role (no ticket yet)
-    coordinator role: key 4d29d53d46e3..
-      ttl 3600s, holder PublicKey(4d29d53d...)
+    coordinator role: key cac2fa1ad8db..
+      ttl 3600s, holder PublicKey(cac2fa1a...)
       page_oncall(reason=Wildcard())
       read_logs(service=Pattern('*'))
       restart_service(service=Pattern('web-*'))
@@ -153,11 +153,11 @@ warnings on stderr first.
     remediation_agent: no ticket (granted at transfer_to_agent, from the alert record)
 
 3. ticket granted at hand-off
-    remediation ticket: key 32139be64cbb..
-      ttl 600s, holder PublicKey(32139be6...)
+    remediation ticket: key 398b467a1e6b..
+      ttl 600s, holder PublicKey(398b467a...)
       read_logs(service=Exact('web-checkout'))
       scale_service(replicas=Range(min=1.0, max=4.0), service=Exact('web-checkout'))
-      delegation receipt: DelegationReceipt(parent='tnu_wrt_01a0b6ad3ff376919e07d021266ec142', child='tnu_wrt_01a0b6ad40957152ae7089eed36bc2d4')
+      delegation receipt: DelegationReceipt(parent='tnu_wrt_01a0b6af1fb47e53a91ac25687c744ba', child='tnu_wrt_01a0b6af20747193a90bf7a275416697')
 
 4. hand-off record
     [coordinator] ok     transfer_to_agent({'agent_name': 'remediation_agent'})
@@ -186,7 +186,7 @@ warnings on stderr first.
     UntrustedRoot: Root warrant issuer is not trusted
 
 10. receipts: one signed record per gateway decision
-    6 receipts, all signed by gateway key d7ecc27ff47f..: ['allow:ok', 'allow:ok', 'allow:ok', 'deny:constraint_violation', 'deny:constraint_violation', 'deny:tool_not_authorized']
+    6 receipts, all signed by gateway key f580133589d3..: ['allow:ok', 'allow:ok', 'allow:ok', 'deny:constraint_violation', 'deny:constraint_violation', 'deny:tool_not_authorized']
     tampered receipt -> ValidationError
 
 11. above the ticket: the role allows it only with an approval

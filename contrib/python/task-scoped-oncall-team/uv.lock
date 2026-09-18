@@ -1077,6 +1077,35 @@ wheels = [
 ]
 
 [[package]]
+name = "task-scoped-oncall-team"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "google-adk" },
+    { name = "google-genai" },
+    { name = "pydantic" },
+    { name = "python-dotenv" },
+    { name = "tenuo" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "google-adk", specifier = ">=2.9,<3" },
+    { name = "google-genai", specifier = ">=1.9.0" },
+    { name = "pydantic", specifier = ">=2" },
+    { name = "python-dotenv", specifier = ">=1.0.1" },
+    { name = "tenuo", specifier = ">=0.3.0,<0.4" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.3.5" }]
+
+[[package]]
 name = "tenacity"
 version = "9.1.4"
 source = { registry = "https://pypi.org/simple/" }
@@ -1142,35 +1171,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/5d/ad/04bbb797c84fc1f26
 wheels = [
     { url = "https://files.pythonhosted.org/packages/76/18/0eea75741ee812e9f598b687619ce2454f6c3a1c5cd21ea990ec6bd26f45/uvicorn-0.53.0-py3-none-any.whl", hash = "sha256:e8dca71ec86dce5f04e333f0d56cdedf942446e6643b9cea1af0d6d3a02cb03e", size = 87081, upload-time = "2026-09-14T07:44:22.179Z" },
 ]
-
-[[package]]
-name = "warrant-scoped-oncall-team"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "google-adk" },
-    { name = "google-genai" },
-    { name = "pydantic" },
-    { name = "python-dotenv" },
-    { name = "tenuo" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "google-adk", specifier = ">=2.9,<3" },
-    { name = "google-genai", specifier = ">=1.9.0" },
-    { name = "pydantic", specifier = ">=2" },
-    { name = "python-dotenv", specifier = ">=1.0.1" },
-    { name = "tenuo", specifier = ">=0.3.0,<0.4" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.3.5" }]
 
 [[package]]
 name = "watchdog"

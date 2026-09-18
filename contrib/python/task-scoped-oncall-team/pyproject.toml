@@ -1,5 +1,5 @@
 [project]
-name = "warrant-scoped-oncall-team"
+name = "task-scoped-oncall-team"
 version = "0.1.0"
 description = "On-call standing authority is narrowed into a per-alert ticket at hand-off, bound to the remediation agent's key; the fleet gateway verifies the warrant chain and proof-of-possession before any replica change."
 license = {text = "Apache License 2.0"}
