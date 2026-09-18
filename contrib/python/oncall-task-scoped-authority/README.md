@@ -6,15 +6,27 @@ restart payments. One legitimate scale succeeds; every action outside the
 alert's scope is refused before the fleet changes.
 
 The recipe demonstrates task-scoped authority with signed **warrants** from
-[tenuo](https://github.com/tenuo-ai/tenuo), an Apache-2.0 library:
+[tenuo](https://github.com/tenuo-ai/tenuo), an Apache-2.0 library. A warrant
+is a signed, bounded grant that describes which tools its holder may call,
+with which arguments, and until when.
 
-- A **role** is the coordinator's standing warrant.
-- A **ticket** is a narrower warrant for one alert and one remediation agent.
-- A **gateway** verifies the ticket and exact tool arguments where the fleet
-  changes.
+This recipe forms a delegation chain:
+
+- The coordinator holds a broader **parent warrant** for on-call
+  coordination.
+- At hand-off, it derives a **task warrant** limited to one alert, one
+  service, and ten minutes.
+- The remediation agent can use only that task warrant and cannot delegate it
+  further.
+- A **gateway** verifies the task warrant and exact tool arguments where the
+  fleet changes.
+
+The code uses `role` and `ticket` in identifiers such as `mint_role()` and
+`grant_ticket()`. In this README, those objects are called the parent warrant
+and task warrant to make their relationship explicit.
 
 ```text
-platform -> standing role -> coordinator -> task ticket -> remediation agent
+platform -> parent warrant -> coordinator -> task warrant -> remediation agent
                                                           |
                                                     signed tool call
                                                           |
@@ -46,7 +58,7 @@ flow, callbacks, plugin manager, session service, and tools.
 ## Expected result
 
 The remediation agent follows the injected log line. The gateway permits the
-one call covered by its ticket and denies the rest:
+one call covered by its task warrant and denies the rest:
 
 ```text
 ALLOWED  scale_service(web-checkout, 3)
@@ -65,10 +77,10 @@ approval gates against the same verifier.
 
 The code in `app/` follows these five steps.
 
-### 1. Provision the standing role
+### 1. Provision the parent warrant
 
-In `app/authority.py`, a platform key mints a role to the coordinator's key.
-The role permits the coordinator to:
+In `app/authority.py`, a platform key mints the parent warrant to the
+coordinator's key. The parent warrant permits the coordinator to:
 
 - read any logs;
 - scale or restart `web-*` services;
@@ -83,27 +95,27 @@ receives only its public key.
 ### 2. Receive the alert
 
 `app/alert.py` contains alert `ALR-2291` for `web-checkout`. The model can
-read and discuss the alert, but it does not choose the ticket's scope. The
-service name comes from this trusted record.
+read and discuss the alert, but it does not choose the task warrant's scope.
+The service name comes from this trusted record.
 
-### 3. Grant a ticket during hand-off
+### 3. Grant a task warrant during hand-off
 
 In ADK, `transfer_to_agent` is a tool call. `app/plugin.py` verifies that the
-coordinator's role permits the transfer and then grants the remediation agent
-a ticket for:
+coordinator's parent warrant permits the transfer and then grants the
+remediation agent a task warrant for:
 
 - `read_logs(service="web-checkout")`;
 - `scale_service(service="web-checkout", replicas=1..4)`;
 - ten minutes; and
 - the remediation agent's public key.
 
-The ticket is terminal, so the remediation agent cannot delegate it again.
-It does not include `restart_service` or `transfer_to_agent`. Until the
-hand-off succeeds, the remediation agent has no authority.
+The task warrant is terminal, so the remediation agent cannot delegate it
+again. It does not include `restart_service` or `transfer_to_agent`. Until
+the hand-off succeeds, the remediation agent has no authority.
 
-Granting is itself checked. A ticket that adds a tool, widens a service
+Granting is itself checked. A task warrant that adds a tool, widens a service
 pattern, or raises a replica ceiling is refused. A requested lifetime longer
-than the role's remaining lifetime is clamped to the role.
+than the parent warrant's remaining lifetime is clamped to the parent.
 
 ### 4. Sign the exact tool call
 
@@ -133,7 +145,7 @@ call.
 
 | Side | Object | Holds | Responsibility |
 |---|---|---|---|
-| Holder | `InvocationPlugin` | The role and one signing key per agent | Authorize hand-off and sign exact tool arguments |
+| Holder | `InvocationPlugin` | The parent warrant and one signing key per agent | Authorize hand-off and sign exact tool arguments |
 | Resource | `FleetGateway` | The public root, receipt key, and fleet | Verify authority, execute allowed tools, and record decisions |
 
 ## Why use a warrant?
@@ -159,13 +171,14 @@ The demo and tests cover more than the central injected-log scenario.
 
 ### Delegation and identity
 
-- A ticket copied to an agent with a different key fails proof-of-possession.
-- A ticket wider than its parent role fails during grant.
-- A terminal ticket cannot be delegated again.
+- A task warrant copied to an agent with a different key fails
+  proof-of-possession.
+- A task warrant wider than its parent warrant fails during grant.
+- A terminal task warrant cannot be delegated again.
 - A warrant from an unknown issuer fails because its root is not trusted.
-- An expired ticket fails even if its signature is otherwise valid.
+- An expired task warrant fails even if its signature is otherwise valid.
 
-The ticket's delegation receipt records its parent, child, and intent:
+The task warrant's delegation receipt records its parent, child, and intent:
 `remediate ALR-2291 on web-checkout`.
 
 ### Signed decision receipts
@@ -179,14 +192,14 @@ and arguments received, is rejected before warrant verification. That
 structural rejection stays in the ordinary decision log because there is no
 completed authority decision for a receipt to commit to.
 
-### Approval above the ticket
+### Approval beyond the task warrant
 
-The standing role permits up to ten replicas, but five or more requires a
+The parent warrant permits up to ten replicas, but five or more requires a
 signed approval from the SRE lead in addition to the coordinator's signature.
-The remediation ticket stops at four, so the remediation agent is denied
-above four rather than paused for approval. The demo separately shows the
-coordinator's six-replica call failing without the named approver, succeeding
-with the SRE lead, and rejecting a stranger's approval.
+The task warrant stops at four, so the remediation agent is denied above four
+rather than paused for approval. The demo separately shows the coordinator's
+six-replica call failing without the named approver, succeeding with the SRE
+lead, and rejecting a stranger's approval.
 
 ## Run with a live model
 
@@ -201,14 +214,14 @@ uv run adk run app        # or: uv run adk web
 
 A live model may or may not follow the injected instruction. The gateway's
 answer is the same either way. `adk run` and `adk web` load one module-level
-app per process; tickets are granted per session at hand-off.
+app per process; task warrants are granted per session at hand-off.
 
 ## Trust boundary
 
 The adversary is an agent steered by content it read into requesting an action
-outside its ticket. Fleet calls are enforced at the gateway immediately
+outside its task warrant. Fleet calls are enforced at the gateway immediately
 before the side effect. The `transfer_to_agent` hand-off is enforced by the
-plugin before it grants a ticket. Neither check tries to decide whether
+plugin before it grants a task warrant. Neither check tries to decide whether
 scaling to three is a good remediation; they decide only whether the caller
 has authority to request it.
 
@@ -228,13 +241,13 @@ registry keyed by ADK's function-call ID.
 - Replace `FleetGateway._execute` with your side effects, and constrain every
   tool argument in `mint_role()` and `grant_ticket()`. An argument omitted
   from the warrant is refused.
-- Build tickets from a trusted task record, such as an alert, support ticket,
-  or order. Never build their scope from model output.
+- Build task warrants from a trusted task record, such as an alert, support
+  ticket, or order. Never build their scope from model output.
 - Move `FleetGateway` to the resource process. Send the encoded warrant chain
   and signature with the call, and configure the gateway with the platform's
   public key.
-- Put floors as well as ceilings in numeric constraints. `Range(1, 4)` is a
-  ticket; a range without a minimum may permit scaling to zero.
+- Put floors as well as ceilings in numeric constraints. A range without a
+  minimum may permit scaling to zero.
 - Preserve argument types. Signed values `"3"` and `3` are different, and the
   plugin does not coerce them.
 
@@ -242,7 +255,7 @@ registry keyed by ADK's function-call ID.
 
 | Path | Purpose |
 |---|---|
-| `app/authority.py` | Mint the standing role and issue per-alert tickets |
+| `app/authority.py` | Mint the parent warrant and issue task warrants |
 | `app/alert.py` | Supply the trusted alert record |
 | `app/plugin.py` | Authorize hand-off and sign each agent's calls |
 | `app/gateway.py` | Verify authority, execute tools, and sign receipts |
