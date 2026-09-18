@@ -12,31 +12,27 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""Who holds what, written down as signed warrants.
+"""Standing on-call authority, and the per-alert ticket granted from it.
 
-Two warrants, one chain:
+Two different moments, two different keys:
 
-1. The ROLE warrant. The platform key mints it to the coordinator's
-   key. It says what the on-call role may do at all: read any logs,
-   scale or restart `web-*` services up to ten replicas, page, and hand
-   an alert to the remediation agent.
+1. Provision. A platform key mints a ROLE warrant to the coordinator.
+   That is standing eligibility for the shift: read logs, scale or
+   restart `web-*` between one and ten replicas, page, hand off. After
+   minting, the platform private key is discarded. The fleet gateway
+   keeps only the public root.
 
-2. The TICKET warrant. When an alert arrives the coordinator narrows
-   its role into a ticket for the remediation agent: this one service,
-   at most four replicas, ten minutes, bound to the remediation agent's
-   OWN key. The library refuses the grant if it widens anything the
-   role holds (`MonotonicityError`).
+2. Hand-off. When the coordinator transfers an alert, it grants a
+   TICKET from the role to the remediation agent's own key. The service
+   name and replica ceiling come from the alert record, never from the
+   model. The library refuses the grant if the ticket would hold
+   anything the role does not (`MonotonicityError`).
 
-The values the ticket is narrowed to come from the alert record, never
-from model output. Each agent signs its tool calls with its own key,
-so a ticket copied out of one agent is useless to another.
-
-Every argument a tool accepts must be named in the capability that
-covers it. An argument with no constraint is refused as an unknown
-field, so a free-text argument gets `Wildcard()` explicitly.
+The ticket does not exist until that grant. A remediation call that
+arrives before hand-off has no chain to present.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from tenuo import (
     Exact,
@@ -51,23 +47,25 @@ from tenuo import (
 COORDINATOR_AGENT_NAME = "coordinator"
 REMEDIATION_AGENT_NAME = "remediation_agent"
 
-ROLE_TTL_SECONDS = 3600  # one on-call shift segment
-ROLE_MAX_REPLICAS = 10.0
+ROLE_TTL_SECONDS = 3600
+ROLE_REPLICA_MIN = 1.0
+ROLE_REPLICA_MAX = 10.0
 ROLE_SERVICE_PATTERN = "web-*"
 
-TICKET_TTL_SECONDS = 600  # ten minutes: long enough to act, not to linger
-TICKET_MAX_REPLICAS = 4.0
+TICKET_TTL_SECONDS = 600
+TICKET_REPLICA_MIN = 1.0
+TICKET_REPLICA_MAX = 4.0
 
 
 def mint_role(platform_key: SigningKey, coordinator_key: SigningKey) -> Warrant:
-    """The on-call role, minted by the platform to the coordinator."""
+    """Standing on-call role, minted by the platform to the coordinator."""
     return (
         Warrant.mint_builder()
         .capability("read_logs", service=Pattern("*"))
         .capability(
             "scale_service",
             service=Pattern(ROLE_SERVICE_PATTERN),
-            replicas=Range.max_value(ROLE_MAX_REPLICAS),
+            replicas=Range(ROLE_REPLICA_MIN, ROLE_REPLICA_MAX),
         )
         .capability("restart_service", service=Pattern(ROLE_SERVICE_PATTERN))
         .capability("page_oncall", reason=Wildcard())
@@ -80,17 +78,16 @@ def mint_role(platform_key: SigningKey, coordinator_key: SigningKey) -> Warrant:
     )
 
 
-def narrow_ticket(
+def grant_ticket(
     role: Warrant,
     coordinator_key: SigningKey,
     remediation_key: SigningKey,
     service: str,
 ) -> Warrant:
-    """The coordinator narrows its role into a ticket for one service.
+    """Narrow the role into a ticket for one service.
 
     Raises `tenuo.exceptions.MonotonicityError` if the ticket would hold
-    anything the role does not: an extra tool, a wider pattern, a
-    higher ceiling, a longer life.
+    anything the role does not.
     """
     return (
         role.grant_builder()
@@ -98,7 +95,7 @@ def narrow_ticket(
         .capability(
             "scale_service",
             service=Exact(service),
-            replicas=Range.max_value(TICKET_MAX_REPLICAS),
+            replicas=Range(TICKET_REPLICA_MIN, TICKET_REPLICA_MAX),
         )
         .holder(remediation_key.public_key)
         .ttl(TICKET_TTL_SECONDS)
@@ -106,49 +103,70 @@ def narrow_ticket(
     )
 
 
-@dataclass(frozen=True)
-class TeamAuthority:
-    """Everything the plugin needs to check a call from either agent.
+@dataclass
+class OnCallAuthority:
+    """Holder-side material: the role, per-agent keys, and the public root.
 
-    `chains` maps an agent name to its full warrant chain, root first.
-    `keys` maps an agent name to the key that chain is bound to. The
-    platform key is deliberately not here: once the role is minted it
-    is not needed to run, only its public half is, as a trusted root.
+    The platform private key is not here. The gateway never receives
+    these signing keys; it is constructed with `trusted_roots` only.
     """
 
     trusted_roots: list
     keys: dict[str, SigningKey]
-    chains: dict[str, list[Warrant]]
-
-    def chain_for(self, agent_name: str) -> list[Warrant]:
-        return list(self.chains[agent_name])
+    role: Warrant
+    _tickets: dict[str, Warrant] = field(default_factory=dict)
 
     def key_for(self, agent_name: str) -> SigningKey:
         return self.keys[agent_name]
 
+    def chain_for(
+        self, agent_name: str, session_id: str | None = None
+    ) -> list[Warrant] | None:
+        if agent_name == COORDINATOR_AGENT_NAME:
+            return [self.role]
+        if agent_name != REMEDIATION_AGENT_NAME or session_id is None:
+            return None
+        ticket = self._tickets.get(session_id)
+        if ticket is None:
+            return None
+        return [self.role, ticket]
 
-def issue(service: str) -> TeamAuthority:
-    """Mint the role, narrow the ticket, and hand back the result.
+    def issue_ticket(self, service: str, session_id: str) -> list[Warrant]:
+        """Grant a ticket from the alert's service and remember it for this session."""
+        ticket = grant_ticket(
+            self.role,
+            self.keys[COORDINATOR_AGENT_NAME],
+            self.keys[REMEDIATION_AGENT_NAME],
+            service,
+        )
+        self._tickets[session_id] = ticket
+        return [self.role, ticket]
 
-    Keys are generated here for a self-contained run. In a deployment
-    the platform key is held by whatever provisions agents, and each
-    agent process holds only its own key.
+    def ticket_for(self, session_id: str) -> Warrant | None:
+        return self._tickets.get(session_id)
+
+
+def provision() -> OnCallAuthority:
+    """Mint the standing role. No ticket is granted here.
+
+    Keys are generated so the recipe runs by itself. In a deployment the
+    platform key lives with whatever provisions agents, each agent
+    process holds only its own key, and the gateway is given the
+    platform public key.
     """
     platform_key = SigningKey.generate()
     coordinator_key = SigningKey.generate()
     remediation_key = SigningKey.generate()
 
     role = mint_role(platform_key, coordinator_key)
-    ticket = narrow_ticket(role, coordinator_key, remediation_key, service)
+    trusted_roots = [platform_key.public_key]
+    del platform_key
 
-    return TeamAuthority(
-        trusted_roots=[platform_key.public_key],
+    return OnCallAuthority(
+        trusted_roots=trusted_roots,
         keys={
             COORDINATOR_AGENT_NAME: coordinator_key,
             REMEDIATION_AGENT_NAME: remediation_key,
         },
-        chains={
-            COORDINATOR_AGENT_NAME: [role],
-            REMEDIATION_AGENT_NAME: [role, ticket],
-        },
+        role=role,
     )

@@ -1,7 +1,7 @@
 [project]
 name = "warrant-scoped-oncall-team"
 version = "0.1.0"
-description = "An SRE coordinator narrows its on-call role into a ticket scoped to one service, a replica ceiling and ten minutes, bound to the remediation sub-agent's own key; every tool call is signed by that agent and verified against the full delegation chain before the tool body runs, so injected instructions to touch other services are refused."
+description = "On-call standing authority is narrowed into a per-alert ticket at hand-off, bound to the remediation agent's key; the fleet gateway verifies the warrant chain and proof-of-possession before any replica change."
 license = {text = "Apache License 2.0"}
 readme = "README.md"
 requires-python = ">=3.11"

@@ -12,13 +12,16 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""An on-call coordinator with a remediation sub-agent, warrant-scoped.
+"""Coordinator + remediation agent, with holder-side signing and a fleet gateway.
 
-Two ordinary `LlmAgent`s and one plugin. The coordinator holds the
-on-call role; the remediation agent holds a ticket narrowed from it for
-the one service named in the alert. `WarrantChainPlugin` is registered
-once on the `App` and checks every tool call in the tree, so neither
-agent's prompt, tool list or model choice is a security control.
+The coordinator is provisioned with the standing on-call role. The
+remediation agent starts with no ticket. `InvocationPlugin` grants that
+ticket at `transfer_to_agent` from the alert record, then signs each
+fleet call. `FleetGateway` is the only object that mutates the fleet,
+and it is constructed with the platform public key alone.
+
+If the plugin is left off, tools still run and the gateway refuses
+every call: there is no signed invocation to present.
 """
 
 import os
@@ -27,8 +30,10 @@ from typing import Any
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.apps.app import App
 
+from . import alert as alert_mod
 from . import authority, tools
-from .authz import WarrantChainPlugin
+from .gateway import FleetGateway
+from .plugin import InvocationPlugin
 from .prompt import COORDINATOR_PROMPT, REMEDIATION_PROMPT
 
 APP_NAME = "warrant-scoped-oncall-team"
@@ -37,8 +42,7 @@ REMEDIATION_AGENT_NAME = authority.REMEDIATION_AGENT_NAME
 
 
 def build_root_agent(model: Any) -> LlmAgent:
-    """The agent tree. `model` is a model name or a `BaseLlm` instance,
-    so the offline demo can pass a scripted model in its place."""
+    """The agent tree. `model` is a model name or a `BaseLlm` instance."""
     remediation_agent = LlmAgent(
         name=REMEDIATION_AGENT_NAME,
         model=model,
@@ -58,34 +62,19 @@ def build_root_agent(model: Any) -> LlmAgent:
 
 def build_app(
     model: Any, *, alert: dict[str, Any] | None = None
-) -> tuple[App, authority.TeamAuthority, WarrantChainPlugin]:
-    """An `App` with the plugin attached, plus the warrants and keys it
-    checks against. The ticket is narrowed to `alert["service"]`."""
-    alert = tools.ALERT if alert is None else alert
-    team = authority.issue(alert["service"])
-    plugin = WarrantChainPlugin(team)
+) -> tuple[App, authority.OnCallAuthority, InvocationPlugin, FleetGateway]:
+    """Wire the holder plugin and the fleet gateway for one alert."""
+    alert = alert_mod.ALERT if alert is None else alert
+    team = authority.provision()
+    gateway = FleetGateway(trusted_roots=team.trusted_roots)
+    plugin = InvocationPlugin(team, alert)
+    tools.bind(gateway, plugin.proofs)
     application = App(
         name=APP_NAME,
         root_agent=build_root_agent(model),
         plugins=[plugin],
     )
-    require_plugin(application)
-    return application, team, plugin
-
-
-def require_plugin(application: App) -> None:
-    """Refuse to run an App that lost its plugin.
-
-    Inside `build_app` this cannot fail today; it is a tripwire so that
-    an edit which drops the plugin becomes a startup failure rather than
-    a silent downgrade to unchecked tool calls.
-    """
-    plugins = getattr(application, "plugins", None) or []
-    if not any(isinstance(p, WarrantChainPlugin) for p in plugins):
-        raise RuntimeError(
-            "WarrantChainPlugin is not attached to this App - "
-            "refusing to run unchecked"
-        )
+    return application, team, plugin, gateway
 
 
 # The module-level objects the ADK CLI looks for. `adk run` and `adk web`
@@ -99,14 +88,21 @@ def require_plugin(application: App) -> None:
 # side effects for them.
 #
 # A CLI run builds once, on first access, so every session `adk web`
-# serves shares one role warrant, one ticket and one set of keys, and
-# the ticket's ten minutes start counting then. Fine for trying the
-# recipe out; call `build_app()` per alert for anything more.
+# serves shares one standing role and one set of keys. Tickets are still
+# granted per session at hand-off, and the ticket's ten minutes start
+# then. Fine for trying the recipe out; call `build_app()` per alert
+# where that matters.
 _cli_singletons: dict[str, Any] = {}
 
 
 def __getattr__(name: str) -> Any:
-    if name not in ("app", "root_agent", "team_authority", "warrant_plugin"):
+    if name not in (
+        "app",
+        "root_agent",
+        "team_authority",
+        "invocation_plugin",
+        "fleet_gateway",
+    ):
         raise AttributeError(name)
     if not _cli_singletons:
         model = os.getenv("MODEL_NAME")
@@ -116,11 +112,12 @@ def __getattr__(name: str) -> Any:
                 "`adk web`) needs it; see .env.example. The offline demo "
                 "(`python demo.py`) does not use it."
             )
-        application, team, plugin = build_app(model)
+        application, team, plugin, gateway = build_app(model)
         _cli_singletons.update(
             app=application,
             root_agent=application.root_agent,
             team_authority=team,
-            warrant_plugin=plugin,
+            invocation_plugin=plugin,
+            fleet_gateway=gateway,
         )
     return _cli_singletons[name]

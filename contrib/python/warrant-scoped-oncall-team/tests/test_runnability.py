@@ -17,14 +17,11 @@
 import pytest
 
 import app.agent
-from app.authz import WarrantChainPlugin
+from app.plugin import InvocationPlugin
 
 
 @pytest.fixture(autouse=True)
 def _cli_model_env(monkeypatch):
-    """The CLI-facing module attributes are built lazily and require
-    MODEL_NAME (there is deliberately no in-code default): provide one
-    for these tests and reset the singleton cache around each."""
     monkeypatch.setenv("MODEL_NAME", "test-model")
     app.agent._cli_singletons.clear()
     yield
@@ -39,15 +36,13 @@ def test_cli_objects_require_model_name(monkeypatch):
 
 
 def test_agent_runnability() -> None:
-    """agent.py imports and defines the expected globals."""
     assert app.agent.root_agent is not None
     assert app.agent.app is not None
 
 
-def test_app_carries_the_plugin() -> None:
-    """The App the ADK CLI loads has the plugin attached."""
+def test_app_carries_the_holder_plugin() -> None:
     plugins = getattr(app.agent.app, "plugins", None) or []
-    assert any(isinstance(p, WarrantChainPlugin) for p in plugins)
+    assert any(isinstance(p, InvocationPlugin) for p in plugins)
 
 
 def test_sub_agent_is_reachable_by_transfer() -> None:

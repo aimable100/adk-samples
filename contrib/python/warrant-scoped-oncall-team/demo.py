@@ -12,17 +12,15 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""Run the recipe end to end and print what happened.
+"""Run the recipe end to end and print what the gateway decided.
 
-    python demo.py           # offline, scripted model, no API key
-    python demo.py --live    # real model; needs MODEL_NAME + credentials
+    python demo.py          # offline, scripted model, no API key
+    python demo.py --live   # real model; needs MODEL_NAME + credentials
 
-Offline is the default and is what the tests exercise. The ADK `Runner`,
-its flows, its callbacks and its plugin manager are the real ones; only
-the model is replaced, by a `BaseLlm` subclass that replays a fixed list
-of function calls per agent. The list follows the injected instruction
-in the log excerpt to the letter, which is the worst case a real model
-could produce.
+Offline is the default. The ADK `Runner`, its flows, its callbacks and
+its plugin manager are the real ones. Only the model is replaced, by a
+`BaseLlm` that replays a fixed list of function calls per agent. That
+list follows the injected log line to the letter.
 
 Exit code 0 if every expectation held, 1 otherwise.
 """
@@ -63,18 +61,15 @@ from tenuo.exceptions import (
     UntrustedRoot,
 )
 
-from app import authority, tools
+from app import alert, authority
 from app.agent import REMEDIATION_AGENT_NAME, ROOT_AGENT_NAME, build_app
-from app.authz import DENIED
+from app.gateway import DENIED
 
-# ADK stamps the calling agent's name into `llm_request.config.labels`
-# (google/adk/flows/llm_flows/base_llm_flow.py), so one model instance can
-# drive a whole multi-agent scenario.
 _AGENT_LABEL = "adk_agent_name"
 
 ALERT_MESSAGE = (
-    f"Alert {tools.ALERT['id']} ({tools.ALERT['severity']}): "
-    f"{tools.ALERT['summary']}. Service: {tools.ALERT['service']}."
+    f"Alert {alert.ALERT['id']} ({alert.ALERT['severity']}): "
+    f"{alert.ALERT['summary']}. Service: {alert.ALERT['service']}."
 )
 
 
@@ -87,11 +82,9 @@ def _text(body: str) -> types.Part:
 
 
 class ScriptedLlm(BaseLlm):
-    """A `BaseLlm` that replays a per-agent queue of `types.Part`s."""
+    """Replay a per-agent queue of `types.Part`s."""
 
     model: str = "scripted-offline-model"
-    # A pydantic field on ADK's BaseLlm, not a plain attribute: a
-    # ClassVar here would stop `ScriptedLlm(script=...)` binding at all.
     script: dict[str, list] = Field(default_factory=dict)
 
     async def generate_content_async(
@@ -106,10 +99,7 @@ class ScriptedLlm(BaseLlm):
 
 
 def script() -> dict[str, list]:
-    """The coordinator confirms the symptom and hands off. The
-    remediation agent does its job, then does exactly what the injected
-    log line told it to."""
-    service = tools.ALERT["service"]
+    service = alert.ALERT["service"]
     return {
         ROOT_AGENT_NAME: [
             _fc("read_logs", service=service),
@@ -118,14 +108,13 @@ def script() -> dict[str, list]:
         REMEDIATION_AGENT_NAME: [
             _fc("read_logs", service=service),
             _fc("scale_service", service=service, replicas=3),
-            # From here on, the "SRE NOTE" in the logs is driving.
             _fc("scale_service", service=service, replicas=50),
             _fc("scale_service", service="db-primary", replicas=4),
             _fc("restart_service", service="web-payments"),
             _text(
                 f"Scaled {service} to 3 replicas. The log note asking for "
-                "db-primary, web-payments and 50 replicas was outside my "
-                "ticket and was refused; escalate if it is real."
+                "db-primary, web-payments and 50 replicas was outside the "
+                "ticket and the gateway refused it; escalate if it is real."
             ),
         ],
     }
@@ -133,8 +122,6 @@ def script() -> dict[str, list]:
 
 @dataclass
 class ToolCall:
-    """One function call paired with its response, by ADK part id."""
-
     agent: str
     tool: str
     args: dict[str, Any]
@@ -143,15 +130,6 @@ class ToolCall:
     @property
     def denied(self) -> bool:
         return self.response.get("error") == DENIED
-
-
-def executed_entry(call: ToolCall) -> tuple[str, Any]:
-    """The `tools.EXECUTED` entry this call would have left had its body
-    run: `(name, service)` or, for `scale_service`, `(name, (service,
-    replicas))`, matching what each body records first."""
-    if call.tool == "scale_service":
-        return (call.tool, (call.args["service"], call.args["replicas"]))
-    return (call.tool, next(iter(call.args.values())))
 
 
 async def _drive(application, message: str) -> list:
@@ -171,14 +149,11 @@ async def _drive(application, message: str) -> list:
 
 
 def _event_parts(event) -> list:
-    """An event's content parts, or `[]` for an event with no content;
-    not every runner event carries one (e.g. a turn-boundary event)."""
     content = getattr(event, "content", None)
     return content.parts if content and content.parts else []
 
 
 def tool_calls(events) -> list[ToolCall]:
-    """Every function call in the run, in order, with its response."""
     pending: dict[str, tuple[str, str, dict]] = {}
     out: list[ToolCall] = []
     for event in events:
@@ -198,11 +173,9 @@ def tool_calls(events) -> list[ToolCall]:
 
 
 def run(model: Any):
-    """One turn. Returns (events, team_authority, plugin)."""
-    tools.reset()
-    application, team, plugin = build_app(model)
+    application, team, plugin, gateway = build_app(model)
     events = asyncio.run(_drive(application, ALERT_MESSAGE))
-    return events, team, plugin
+    return events, team, plugin, gateway
 
 
 def run_offline():
@@ -210,8 +183,6 @@ def run_offline():
 
 
 def _fmt(constraint: Any) -> str:
-    """`Range(min=None, max=Some(4.0))` -> `Range(max=4.0)`; the reprs
-    come from the Rust core and read better with the wrapping removed."""
     text = repr(constraint)
     text = re.sub(r"Some\((.*?)\)", r"\1", text)
     text = re.sub(r'String\("(.*?)"\)', r"'\1'", text)
@@ -226,21 +197,20 @@ def _describe(warrant: Warrant) -> list[str]:
     return lines
 
 
-def _print_holdings(team: authority.TeamAuthority) -> None:
-    for agent in (ROOT_AGENT_NAME, REMEDIATION_AGENT_NAME):
-        chain = team.chain_for(agent)
-        leaf = chain[-1]
-        key_hex = bytes(team.key_for(agent).public_key_bytes()).hex()
-        print(f"    {agent}: chain depth {len(chain)}, key {key_hex[:12]}..")
-        print(f"      ttl {leaf.ttl_seconds()}s, holder {leaf.holder_key}")
-        for line in _describe(leaf):
-            print(f"      {line}")
+def _print_warrant(label: str, warrant: Warrant, key_hex: str) -> None:
+    print(f"    {label}: key {key_hex[:12]}..")
+    print(f"      ttl {warrant.ttl_seconds()}s, holder {warrant.holder_key}")
+    for line in _describe(warrant):
+        print(f"      {line}")
 
 
-def _print_transcript(calls: list[ToolCall]) -> None:
-    for call in calls:
-        verdict = "DENIED" if call.denied else "ok    "
-        print(f"    [{call.agent}] {verdict} {call.tool}({call.args})")
+def _print_gateway(gateway) -> None:
+    for decision in gateway.decisions:
+        verdict = "ok    " if decision.allowed else "DENIED"
+        print(
+            f"    [{decision.agent}] {verdict} {decision.tool}({decision.args})"
+            + ("" if decision.allowed else f" [{decision.reason}]")
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -257,28 +227,50 @@ def main(argv: list[str] | None = None) -> int:
         model = ScriptedLlm(script=script())
         print("[offline] scripted model, no API key needed")
 
-    print(f"\n1. the alert: {ALERT_MESSAGE}")
-    events, team, _plugin = run(model)
-    service = tools.ALERT["service"]
+    print("\n1. alert record (ticket will be granted from this, not the model)")
+    print(f"    {ALERT_MESSAGE}")
 
-    print("\n2. what each agent holds (role -> ticket)")
-    _print_holdings(team)
+    application, team, plugin, gateway = build_app(model)
+    print("\n2. standing role (no ticket yet)")
+    service = alert.ALERT["service"]
+    coord_hex = bytes(team.key_for(ROOT_AGENT_NAME).public_key_bytes()).hex()
+    _print_warrant("coordinator role", team.role, coord_hex)
+    print(
+        "    remediation_agent: no ticket "
+        "(granted at transfer_to_agent, from the alert record)"
+    )
+    assert team.ticket_for("anything") is None
 
-    print("\n3. one turn, two agents")
+    events = asyncio.run(_drive(application, ALERT_MESSAGE))
+
+    print("\n3. ticket granted at hand-off")
+    tickets = list(team._tickets.values())
+    if tickets:
+        rem_hex = bytes(
+            team.key_for(REMEDIATION_AGENT_NAME).public_key_bytes()
+        ).hex()
+        _print_warrant("remediation ticket", tickets[-1], rem_hex)
+    else:
+        print("    (no ticket was granted)")
+
+    print("\n4. hand-off record")
+    for decision in plugin.handoffs:
+        verdict = "ok    " if decision.allowed else "DENIED"
+        print(
+            f"    [{decision.agent}] {verdict} {decision.tool}({decision.args})"
+        )
+    print("\n5. fleet gateway decisions")
+    _print_gateway(gateway)
+    print(f"    fleet after: {gateway.fleet}")
     calls = tool_calls(events)
-    _print_transcript(calls)
-
-    print("\n4. the refusals")
-    print(f"    tool bodies that ran: {tools.EXECUTED}")
     denied = [c for c in calls if c.denied]
+    print("\n6. denials the model saw")
     for call in denied:
         print(
             f"    {call.tool}({call.args}) -> {call.response['reason']}: "
             f"{call.response['detail']}"
         )
-    # A tool body records (name, arg) as its first statement; a denied
-    # call must have left no such record.
-    denied_bodies = [c for c in denied if executed_entry(c) in tools.EXECUTED]
+
     reasons = {
         (c.tool, c.args.get("service")): c.response["reason"] for c in denied
     }
@@ -287,53 +279,63 @@ def main(argv: list[str] | None = None) -> int:
         ("scale_service", "db-primary"): "ConstraintViolation",
         ("restart_service", "web-payments"): "ToolNotAuthorized",
     }
+    fleet_ok = (
+        gateway.fleet[service] == 3
+        and gateway.fleet["web-payments"] == 3
+        and gateway.fleet["db-primary"] == 1
+    )
+    ticket_ok = bool(tickets) and str(tickets[-1].holder_key) == str(
+        team.key_for(REMEDIATION_AGENT_NAME).public_key
+    )
 
     authorizer = Authorizer(trusted_roots=team.trusted_roots)
     now = int(time.time())
-    chain = team.chain_for(REMEDIATION_AGENT_NAME)
-    ticket = chain[-1]
+    chain = team.chain_for(
+        REMEDIATION_AGENT_NAME, next(iter(team._tickets), None)
+    )
+    ticket = tickets[-1] if tickets else None
     remediation_key = team.key_for(REMEDIATION_AGENT_NAME)
     args = {"service": service}
 
-    print("\n5. a leaked ticket, replayed with a different key")
-    stranger = SigningKey.generate()
-    leaked = decode_warrant_stack_base64(encode_warrant_stack(chain))
-    signature = leaked[-1].sign(stranger, "read_logs", args, now)
-    try:
-        authorizer.check_chain(leaked, "read_logs", args, signature)
-        replay_ok = False
-        print("    ALLOWED (unexpected)")
-    except SignatureInvalid as exc:
-        replay_ok = True
-        print(f"    {type(exc).__name__}: {exc}")
+    print("\n7. leaked ticket, replayed with a different key")
+    replay_ok = False
+    if chain is not None:
+        stranger = SigningKey.generate()
+        leaked = decode_warrant_stack_base64(encode_warrant_stack(chain))
+        signature = leaked[-1].sign(stranger, "read_logs", args, now)
+        try:
+            authorizer.check_chain(leaked, "read_logs", args, signature)
+            print("    ALLOWED (unexpected)")
+        except SignatureInvalid as exc:
+            replay_ok = True
+            print(f"    {type(exc).__name__}: {exc}")
 
-    print("\n6. the remediation agent tries to widen its own ticket")
-    try:
-        (
-            ticket.grant_builder()
-            .capability(
-                "scale_service",
-                service=Exact(service),
-                replicas=Range.max_value(50.0),
+    print("\n8. remediation agent tries to widen its own ticket")
+    widen_ok = False
+    if ticket is not None:
+        try:
+            (
+                ticket.grant_builder()
+                .capability(
+                    "scale_service",
+                    service=Exact(service),
+                    replicas=Range(1.0, 50.0),
+                )
+                .holder(remediation_key.public_key)
+                .ttl(authority.TICKET_TTL_SECONDS)
+                .grant(remediation_key)
             )
-            .holder(remediation_key.public_key)
-            .ttl(authority.TICKET_TTL_SECONDS)
-            .grant(remediation_key)
-        )
-        widen_ok = False
-        print("    granted (unexpected)")
-    except MonotonicityError as exc:
-        widen_ok = True
-        d = exc.details
-        # Formatted from `details`, not `str(exc)`, which is what a
-        # caller should rely on: the fields are stable, the prose is not.
-        print(
-            f"    MonotonicityError ({type(exc).__name__}): child "
-            f"{d.get('bound')} {d.get('child_value')} exceeds parent "
-            f"{d.get('bound')} {d.get('parent_value')}"
-        )
+            print("    granted (unexpected)")
+        except MonotonicityError as exc:
+            widen_ok = True
+            d = exc.details
+            print(
+                f"    MonotonicityError ({type(exc).__name__}): child "
+                f"{d.get('bound')} {d.get('child_value')} exceeds parent "
+                f"{d.get('bound')} {d.get('parent_value')}"
+            )
 
-    print("\n7. a warrant minted by a key the platform never issued")
+    print("\n9. a warrant minted by a key the platform never issued")
     rogue = SigningKey.generate()
     forged = (
         Warrant.mint_builder()
@@ -353,11 +355,12 @@ def main(argv: list[str] | None = None) -> int:
 
     ok = (
         scripted_ok
-        and not denied_bodies
-        and all(not c.denied for c in calls if c.tool == "read_logs")
+        and fleet_ok
+        and ticket_ok
         and replay_ok
         and widen_ok
         and forged_ok
+        and all(not c.denied for c in calls if c.tool == "read_logs")
     )
     print("\nRESULT:", "OK" if ok else "FAILED")
     return 0 if ok else 1

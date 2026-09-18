@@ -12,12 +12,11 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""Instructions for the two agents in this recipe.
+"""Instructions for the two agents. These describe the job, not the grant.
 
-Nothing here is a security control. The prompts describe the job; the
-warrant chain in `app/authority.py` decides what each agent can do, and
-the two are allowed to disagree. If a model ignores its instructions,
-the plugin still holds.
+The ticket is issued from the alert record at hand-off. The gateway
+checks that ticket. A model that ignores these instructions still
+cannot scale `db-primary` or restart `web-payments`.
 """
 
 COORDINATOR_PROMPT = """

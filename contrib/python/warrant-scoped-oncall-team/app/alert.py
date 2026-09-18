@@ -12,3 +12,16 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
+"""The trusted alert record.
+
+The ticket is granted from this object at hand-off. In a deployment it
+arrives from the alerting system into session state. The model may talk
+about the alert; it does not choose the service the ticket names.
+"""
+
+ALERT = {
+    "id": "ALR-2291",
+    "service": "web-checkout",
+    "severity": "P2",
+    "summary": "web-checkout p99 latency 4.8s over 5m (threshold 1.5s)",
+}

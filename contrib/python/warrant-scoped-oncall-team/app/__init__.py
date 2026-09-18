@@ -12,8 +12,7 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""An on-call role narrowed into a per-ticket warrant across an ADK
-hand-off, verified per tool call at the plugin callback."""
+"""Standing on-call role, per-alert ticket at hand-off, gateway verification."""
 
 from dotenv import load_dotenv
 

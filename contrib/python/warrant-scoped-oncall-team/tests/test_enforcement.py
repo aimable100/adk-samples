@@ -12,12 +12,12 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-"""What the recipe claims, asserted. Offline: no API key, no network."""
+"""The production claims, asserted. Offline: no API key, no network."""
 
 import time
+from types import SimpleNamespace
 
 import pytest
-from google.adk.apps.app import App
 from tenuo import (
     Authorizer,
     Exact,
@@ -35,27 +35,23 @@ from tenuo.exceptions import (
 )
 
 import demo
-from app import authority, tools
-from app.agent import (
-    REMEDIATION_AGENT_NAME,
-    ROOT_AGENT_NAME,
-    build_root_agent,
-    require_plugin,
-)
-from app.authz import DENIED, WarrantChainPlugin
+from app import alert, authority, tools
+from app.agent import REMEDIATION_AGENT_NAME, ROOT_AGENT_NAME, build_app
+from app.gateway import DENIED, FleetGateway, ProofRegistry
+from app.plugin import InvocationPlugin
 
-SERVICE = tools.ALERT["service"]
+SERVICE = alert.ALERT["service"]
 
 
 @pytest.fixture(scope="module")
 def run():
-    events, team, plugin = demo.run_offline()
-    return demo.tool_calls(events), team, plugin, list(tools.EXECUTED)
+    events, team, plugin, gateway = demo.run_offline()
+    return demo.tool_calls(events), team, plugin, gateway
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def team():
-    return authority.issue(SERVICE)
+    return authority.provision()
 
 
 def _call(calls, tool, **args):
@@ -68,20 +64,48 @@ def _call(calls, tool, **args):
     return matches[0]
 
 
-# ---------------------------------------------------------------- the run
+def test_no_ticket_exists_until_handoff(team):
+    assert team.ticket_for("session-1") is None
+    assert team.chain_for(REMEDIATION_AGENT_NAME, "session-1") is None
 
 
-def test_the_hand_off_and_the_in_ticket_calls_go_through(run):
-    calls, _team, _plugin, executed = run
+def test_ticket_is_granted_from_the_alert_service_not_the_model(team):
+    chain = team.issue_ticket(SERVICE, "session-1")
+    ticket = chain[-1]
+    assert str(ticket.holder_key) == str(
+        team.key_for(REMEDIATION_AGENT_NAME).public_key
+    )
+    assert str(ticket.holder_key) != str(
+        team.key_for(ROOT_AGENT_NAME).public_key
+    )
+    assert ticket.ttl_seconds() < team.role.ttl_seconds()
+    assert set(ticket.tools) < set(team.role.tools)
+    assert "restart_service" not in ticket.tools
+    assert "transfer_to_agent" not in ticket.tools
+    assert "scale_service" in ticket.tools
+    assert "restart_service" not in team.ticket_for("session-1").tools
+
+
+def test_platform_private_key_is_not_retained(team):
+    assert not hasattr(team, "platform_key")
+    gateway = FleetGateway(trusted_roots=team.trusted_roots)
+    assert gateway.trusted_roots == team.trusted_roots
+    assert not hasattr(gateway, "keys")
+
+
+def test_handoff_and_in_ticket_calls_reach_the_fleet(run):
+    calls, _team, plugin, gateway = run
     transfer = _call(calls, "transfer_to_agent")
     assert transfer.agent == ROOT_AGENT_NAME
     assert not transfer.denied
-    assert ("read_logs", SERVICE) in executed
-    assert ("scale_service", (SERVICE, 3)) in executed
+    assert plugin.handoffs and plugin.handoffs[0].allowed
+    assert gateway.fleet[SERVICE] == 3
+    allowed = [d for d in gateway.decisions if d.allowed]
+    assert {d.tool for d in allowed} >= {"read_logs", "scale_service"}
 
 
-def test_the_injected_calls_are_refused_before_their_bodies_run(run):
-    calls, _team, _plugin, executed = run
+def test_injected_calls_are_denied_and_the_fleet_is_unchanged(run):
+    calls, _team, _plugin, gateway = run
     over = _call(calls, "scale_service", service=SERVICE, replicas=50)
     other = _call(calls, "scale_service", service="db-primary")
     restart = _call(calls, "restart_service", service="web-payments")
@@ -89,84 +113,115 @@ def test_the_injected_calls_are_refused_before_their_bodies_run(run):
     for call in (over, other, restart):
         assert call.agent == REMEDIATION_AGENT_NAME
         assert call.response["error"] == DENIED
-        assert call.response["agent"] == REMEDIATION_AGENT_NAME
-        # The proof that this was not "run it, then report it": each
-        # tool body appends to EXECUTED as its first statement.
-        assert demo.executed_entry(call) not in executed
 
     assert over.response["reason"] == "ConstraintViolation"
     assert "replicas" in over.response["detail"]
     assert other.response["reason"] == "ConstraintViolation"
     assert "service" in other.response["detail"]
     assert restart.response["reason"] == "ToolNotAuthorized"
+    assert gateway.fleet["web-payments"] == 3
+    assert gateway.fleet["db-primary"] == 1
+    assert gateway.fleet[SERVICE] == 3
 
 
-def test_every_decision_is_recorded_on_the_plugin(run):
-    calls, _team, plugin, _executed = run
-    assert len(plugin.decisions) == len(calls)
-    assert [d.allowed for d in plugin.decisions] == [
-        not c.denied for c in calls
-    ]
+def test_gateway_refuses_a_tool_call_with_no_proof(team):
+    gateway = FleetGateway(trusted_roots=team.trusted_roots)
+    tools.bind(gateway, ProofRegistry())
+    result = tools.scale_service(SERVICE, 3, tool_context=None)
+    assert result["error"] == DENIED
+    assert result["reason"] == "NoInvocation"
+    assert gateway.fleet[SERVICE] == 2
 
 
-# ------------------------------------------------------------ the chain
-
-
-def test_the_ticket_is_narrower_than_the_role(team):
-    role = team.chain_for(ROOT_AGENT_NAME)[-1]
-    ticket = team.chain_for(REMEDIATION_AGENT_NAME)[-1]
-
-    assert set(ticket.tools) < set(role.tools)
-    assert "restart_service" not in ticket.tools
-    assert "transfer_to_agent" not in ticket.tools
-    assert ticket.ttl_seconds() <= authority.TICKET_TTL_SECONDS
-    assert ticket.depth == role.depth + 1
-
-
-def test_the_ticket_is_bound_to_the_remediation_agents_own_key(team):
-    ticket = team.chain_for(REMEDIATION_AGENT_NAME)[-1]
-    remediation_key = team.key_for(REMEDIATION_AGENT_NAME)
-    coordinator_key = team.key_for(ROOT_AGENT_NAME)
-
-    assert str(ticket.holder_key) == str(remediation_key.public_key)
-    assert str(ticket.holder_key) != str(coordinator_key.public_key)
-
-
-def test_the_remediation_agent_cannot_hand_the_alert_on(team):
-    plugin = WarrantChainPlugin(team)
-    refusal = plugin.authorize(
+def test_gateway_refuses_a_proof_of_different_arguments(team):
+    gateway = FleetGateway(trusted_roots=team.trusted_roots)
+    plugin = InvocationPlugin(team, alert.ALERT)
+    chain = team.issue_ticket(SERVICE, "s")
+    proof = plugin.sign(
         REMEDIATION_AGENT_NAME,
-        "transfer_to_agent",
+        "scale_service",
+        {
+            "service": SERVICE,
+            "replicas": 3,
+        },
+        "s",
+    )
+    result = gateway.invoke(
+        "scale_service",
+        {"service": SERVICE, "replicas": 50},
+        proof,
+    )
+    assert result["error"] == DENIED
+    assert result["reason"] == "InvocationMismatch"
+    assert gateway.fleet[SERVICE] == 2
+    assert chain[-1] is team.ticket_for("s")
+
+
+def test_remediation_cannot_hand_the_alert_on(team):
+    plugin = InvocationPlugin(team, alert.ALERT)
+    team.issue_ticket(SERVICE, "s")
+    refusal = plugin._handoff(
+        REMEDIATION_AGENT_NAME,
         {"agent_name": ROOT_AGENT_NAME},
+        SimpleNamespace(state={}),
+        "s",
     )
     assert refusal is not None
     assert refusal["reason"] == "ToolNotAuthorized"
+    # ticket already existed from issue_ticket above; a refused transfer
+    # must not mint a second, wider one.
+    assert "restart_service" not in team.ticket_for("s").tools
 
 
-def test_an_agent_with_no_chain_is_refused(team):
-    plugin = WarrantChainPlugin(team)
-    refusal = plugin.authorize("stray_agent", "read_logs", {"service": SERVICE})
-    assert refusal is not None
-    assert refusal["reason"] == "NoWarrant"
+def test_missing_plugin_is_a_gateway_deny_not_a_silent_allow(team):
+    gateway = FleetGateway(trusted_roots=team.trusted_roots)
+    tools.bind(gateway, ProofRegistry())
+    ctx = SimpleNamespace(state={}, function_call_id="call-1")
+    result = tools.restart_service("web-payments", tool_context=ctx)
+    assert result["reason"] == "NoInvocation"
+    assert gateway.fleet["web-payments"] == 3
 
 
-def test_an_argument_the_ticket_does_not_name_is_refused(team):
-    plugin = WarrantChainPlugin(team)
-    refusal = plugin.authorize(
+def test_a_proof_is_single_use_and_never_in_session_state(team):
+    gateway = FleetGateway(trusted_roots=team.trusted_roots)
+    plugin = InvocationPlugin(team, alert.ALERT)
+    tools.bind(gateway, plugin.proofs)
+    team.issue_ticket(SERVICE, "s")
+    proof = plugin.sign(
         REMEDIATION_AGENT_NAME,
-        "read_logs",
-        {"service": SERVICE, "tail": 500},
+        "scale_service",
+        {"service": SERVICE, "replicas": 3},
+        "s",
     )
-    assert refusal is not None
-    assert refusal["reason"] == "ConstraintViolation"
-    assert "unknown field" in refusal["detail"]
+    plugin.proofs.put("call-7", proof)
+    ctx = SimpleNamespace(state={}, function_call_id="call-7")
+    first = tools.scale_service(SERVICE, 3, tool_context=ctx)
+    assert "error" not in first and gateway.fleet[SERVICE] == 3
+    # Same call id again: the proof was taken once and is gone.
+    second = tools.scale_service(SERVICE, 3, tool_context=ctx)
+    assert second["reason"] == "NoInvocation"
+    assert ctx.state == {}
 
 
-# ------------------------------------------------------ the three extras
+def test_a_call_with_no_session_gets_no_ticket(team):
+    plugin = InvocationPlugin(team, alert.ALERT)
+    refusal = plugin._handoff(
+        ROOT_AGENT_NAME,
+        {"agent_name": REMEDIATION_AGENT_NAME},
+        SimpleNamespace(state={}),
+        None,
+    )
+    assert refusal is not None and refusal["reason"] == "NoWarrant"
+    assert (
+        plugin.sign(
+            REMEDIATION_AGENT_NAME, "read_logs", {"service": SERVICE}, None
+        )
+        is None
+    )
 
 
-def test_a_leaked_ticket_replayed_with_another_key_fails(team):
-    chain = team.chain_for(REMEDIATION_AGENT_NAME)
+def test_leaked_ticket_replayed_with_another_key_fails(team):
+    chain = team.issue_ticket(SERVICE, "s")
     leaked = decode_warrant_stack_base64(encode_warrant_stack(chain))
     stranger = SigningKey.generate()
     args = {"service": SERVICE}
@@ -178,8 +233,8 @@ def test_a_leaked_ticket_replayed_with_another_key_fails(team):
         )
 
 
-def test_the_ticket_alone_does_not_verify_without_its_chain(team):
-    chain = team.chain_for(REMEDIATION_AGENT_NAME)
+def test_ticket_alone_does_not_verify_without_its_chain(team):
+    chain = team.issue_ticket(SERVICE, "s")
     key = team.key_for(REMEDIATION_AGENT_NAME)
     args = {"service": SERVICE}
     signature = chain[-1].sign(key, "read_logs", args, int(time.time()))
@@ -191,7 +246,7 @@ def test_the_ticket_alone_does_not_verify_without_its_chain(team):
 
 
 def test_widening_the_ticket_is_refused_at_grant_time(team):
-    ticket = team.chain_for(REMEDIATION_AGENT_NAME)[-1]
+    ticket = team.issue_ticket(SERVICE, "s")[-1]
     key = team.key_for(REMEDIATION_AGENT_NAME)
 
     with pytest.raises(MonotonicityError) as info:
@@ -200,7 +255,7 @@ def test_widening_the_ticket_is_refused_at_grant_time(team):
             .capability(
                 "scale_service",
                 service=Exact(SERVICE),
-                replicas=Range.max_value(50.0),
+                replicas=Range(1.0, 50.0),
             )
             .holder(key.public_key)
             .ttl(authority.TICKET_TTL_SECONDS)
@@ -236,19 +291,12 @@ def test_a_warrant_from_an_unknown_issuer_is_refused(team):
         )
 
 
-# ------------------------------------------------------------ the wiring
-
-
-def test_an_app_without_the_plugin_refuses_to_start():
-    unchecked = App(
-        name="unchecked",
-        root_agent=build_root_agent("scripted-offline-model"),
-    )
-
-    with pytest.raises(RuntimeError, match="refusing to run unchecked"):
-        require_plugin(unchecked)
-
-
 def test_the_demo_exits_zero(capsys):
     assert demo.main([]) == 0
     assert "RESULT: OK" in capsys.readouterr().out
+
+
+def test_build_app_does_not_grant_a_ticket():
+    application, team, _plugin, _gateway = build_app("scripted-offline-model")
+    assert application.root_agent is not None
+    assert team.ticket_for("anything") is None
