@@ -408,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         expiry_ok = True
         print(f"    {type(exc).__name__}: {exc}")
 
-    print("\n12. receipts: one signed record per gateway decision")
+    print("\n12. receipts: one signed record per warrant decision")
     gateway_key_hex = bytes(gateway.receipt_public_key.to_bytes()).hex()
     outcomes = []
     receipts_ok = bool(gateway.receipts)

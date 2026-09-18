@@ -17,9 +17,11 @@
 `FleetGateway` holds the platform public key, its own receipt key, and
 the in-memory fleet. `invoke` verifies the warrant chain and the
 holder's proof-of-possession against the arguments this call received,
-runs the side effect, and signs a receipt for the decision. In a
-deployment this object lives in the process that owns the fleet; its
-constructor takes trusted roots and nothing else.
+runs the side effect, and signs a receipt for every completed warrant
+verification. A call with no warrant or an inconsistent signed envelope
+is refused at the door before verification. In a deployment this object
+lives in the process that owns the fleet; its constructor takes trusted
+roots and nothing else.
 """
 
 from __future__ import annotations
@@ -117,8 +119,8 @@ class FleetGateway:
 
     trusted_roots: list
     decisions: list[Decision] = field(default_factory=list)
-    # One signed receipt per decision, in wire form. Verify later with
-    # `tenuo_core.verify_receipt` and `receipt_public_key`.
+    # One signed receipt per completed warrant verification, in wire form.
+    # Verify later with `tenuo_core.verify_receipt` and `receipt_public_key`.
     receipts: list[str] = field(default_factory=list)
     _receipt_key: SigningKey = field(init=False, repr=False)
     _issuer: ReceiptIssuer = field(init=False, repr=False)

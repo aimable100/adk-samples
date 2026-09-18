@@ -136,11 +136,14 @@ def test_injected_calls_are_denied_and_the_fleet_is_unchanged(run):
 
 def test_gateway_refuses_a_tool_call_with_no_proof(team):
     gateway = FleetGateway(trusted_roots=team.trusted_roots)
-    tools.bind(gateway, ProofRegistry())
-    result = tools.scale_service(SERVICE, 3, tool_context=None)
+    fleet_tools = tools.FleetTools(gateway, ProofRegistry())
+    result = fleet_tools.scale_service(SERVICE, 3, tool_context=None)
     assert result["error"] == DENIED
     assert result["reason"] == "NoInvocation"
     assert gateway.fleet[SERVICE] == 2
+    # With no warrant presented, this is a door rejection rather than a
+    # decision over authority, so there is nothing for a receipt to commit to.
+    assert gateway.receipts == []
 
 
 def test_gateway_refuses_a_proof_of_different_arguments(team):
@@ -165,6 +168,8 @@ def test_gateway_refuses_a_proof_of_different_arguments(team):
     assert result["reason"] == "InvocationMismatch"
     assert gateway.fleet[SERVICE] == 2
     assert chain[-1] is team.ticket_for("s")
+    # An inconsistent signed envelope is refused before warrant verification.
+    assert gateway.receipts == []
 
 
 def test_remediation_cannot_hand_the_alert_on(team):
@@ -184,9 +189,9 @@ def test_remediation_cannot_hand_the_alert_on(team):
 
 def test_missing_plugin_is_a_gateway_deny_not_a_silent_allow(team):
     gateway = FleetGateway(trusted_roots=team.trusted_roots)
-    tools.bind(gateway, ProofRegistry())
+    fleet_tools = tools.FleetTools(gateway, ProofRegistry())
     ctx = SimpleNamespace(state={}, function_call_id="call-1")
-    result = tools.restart_service("web-payments", tool_context=ctx)
+    result = fleet_tools.restart_service("web-payments", tool_context=ctx)
     assert result["reason"] == "NoInvocation"
     assert gateway.fleet["web-payments"] == 3
 
@@ -194,7 +199,7 @@ def test_missing_plugin_is_a_gateway_deny_not_a_silent_allow(team):
 def test_a_proof_is_single_use_and_never_in_session_state(team):
     gateway = FleetGateway(trusted_roots=team.trusted_roots)
     plugin = InvocationPlugin(team, alert.ALERT)
-    tools.bind(gateway, plugin.proofs)
+    fleet_tools = tools.FleetTools(gateway, plugin.proofs)
     team.issue_ticket(SERVICE, "s")
     proof = plugin.sign(
         REMEDIATION_AGENT_NAME,
@@ -204,10 +209,10 @@ def test_a_proof_is_single_use_and_never_in_session_state(team):
     )
     plugin.proofs.put("call-7", proof)
     ctx = SimpleNamespace(state={}, function_call_id="call-7")
-    first = tools.scale_service(SERVICE, 3, tool_context=ctx)
+    first = fleet_tools.scale_service(SERVICE, 3, tool_context=ctx)
     assert "error" not in first and gateway.fleet[SERVICE] == 3
     # Same call id again: the proof was taken once and is gone.
-    second = tools.scale_service(SERVICE, 3, tool_context=ctx)
+    second = fleet_tools.scale_service(SERVICE, 3, tool_context=ctx)
     assert second["reason"] == "NoInvocation"
     assert ctx.state == {}
 
@@ -380,7 +385,7 @@ def test_a_warrant_from_an_unknown_issuer_is_refused(team):
         )
 
 
-def test_every_gateway_decision_has_a_verifiable_receipt(run):
+def test_every_warrant_decision_has_a_verifiable_receipt(run):
     _calls, _team, _plugin, gateway = run
     assert len(gateway.receipts) == len(gateway.decisions)
     key_hex = bytes(gateway.receipt_public_key.to_bytes()).hex()

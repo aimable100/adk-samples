@@ -5,7 +5,8 @@ remediation sub-agent. The logs the sub-agent reads contain a line
 phrased as an instruction: scale this service to 50, scale the
 database, restart payments. The sub-agent's authority is scoped to the
 task it was handed, not to its role, so it can act on the alert and on
-nothing else, whatever it reads. Every decision leaves a signed receipt.
+nothing else, whatever it reads. Every completed warrant verification
+leaves a signed receipt.
 
 The unit of authority is a **warrant**: a signed grant of which tools
 may be called, with which argument values, by which key, until when.
@@ -14,7 +15,8 @@ that role into a ticket for the sub-agent: this service, one to four
 replicas, ten minutes, bound to the sub-agent's own key. Every tool call
 goes to a gateway that holds only the platform's public key. The
 gateway checks the chain and the signature against the arguments it
-received, runs the tool if they fit, and signs a receipt either way.
+received, runs the tool if they fit, and signs a receipt for either an
+allow or a denial produced by warrant verification.
 
 Warrants come from [tenuo](https://github.com/tenuo-ai/tenuo),
 Apache-2.0.
@@ -85,7 +87,12 @@ the model as the tool result, and the fleet is untouched. Without the
 plugin the tools present no proof and are refused.
 
 **Receipts** (`app/gateway.py`). The gateway signs a receipt for every
-decision with a key of its own and keeps the wire form.
+allow or denial produced by warrant verification with a key of its own
+and keeps the wire form. A call that presents no warrant, or whose
+signed envelope does not match the tool and arguments received, is
+refused at the door before verification. Because there is no completed
+authority decision for a receipt to commit to, that structural refusal
+stays in the ordinary decision log.
 `tenuo_core.verify_receipt` checks the signature offline and returns
 the payload, including the signer's key, which the reader compares to
 the gateway's published key. Tickets also carry a delegation receipt
@@ -101,7 +108,7 @@ four would carry it.
 | Side | Object | Holds | Does |
 |---|---|---|---|
 | Holder | `InvocationPlugin` | the role, one signing key per agent | grants the ticket at hand-off; signs each call's exact arguments |
-| Resource | `FleetGateway` | the platform's public key, its own receipt key, the fleet | verifies chain and signature, runs the tool, signs a receipt |
+| Resource | `FleetGateway` | the platform's public key, its own receipt key, the fleet | verifies chain and signature, runs the tool, signs each warrant decision |
 
 Each agent holds its own key, so the recipe calls `Authorizer.check_chain`
 from its own plugin rather than the library's single-key `TenuoPlugin`.
@@ -202,7 +209,7 @@ warnings on stderr first.
 11. a ticket past its ten minutes (here: a one-second ticket)
     ExpiredError: Warrant 'tnu_wrt_01a0b6b913c87701bb77ba85a1cdfba0' has expired
 
-12. receipts: one signed record per gateway decision
+12. receipts: one signed record per warrant decision
     6 receipts, all signed by gateway key 66ea524134b0..: ['allow:ok', 'allow:ok', 'allow:ok', 'deny:constraint_violation', 'deny:constraint_violation', 'deny:tool_not_authorized']
     tampered receipt -> ValidationError
 

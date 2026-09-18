@@ -39,21 +39,25 @@ ROOT_AGENT_NAME = authority.COORDINATOR_AGENT_NAME
 REMEDIATION_AGENT_NAME = authority.REMEDIATION_AGENT_NAME
 
 
-def build_root_agent(model: Any) -> LlmAgent:
+def build_root_agent(model: Any, fleet_tools: tools.FleetTools) -> LlmAgent:
     """The agent tree. `model` is a model name or a `BaseLlm` instance."""
     remediation_agent = LlmAgent(
         name=REMEDIATION_AGENT_NAME,
         model=model,
         description="Applies a fix for one production alert.",
         instruction=REMEDIATION_PROMPT,
-        tools=[tools.read_logs, tools.scale_service, tools.restart_service],
+        tools=[
+            fleet_tools.read_logs,
+            fleet_tools.scale_service,
+            fleet_tools.restart_service,
+        ],
     )
     return LlmAgent(
         name=ROOT_AGENT_NAME,
         model=model,
         description="Triages production alerts and hands them off.",
         instruction=COORDINATOR_PROMPT,
-        tools=[tools.read_logs, tools.page_oncall],
+        tools=[fleet_tools.read_logs, fleet_tools.page_oncall],
         sub_agents=[remediation_agent],
     )
 
@@ -66,10 +70,10 @@ def build_app(
     team = authority.provision()
     gateway = FleetGateway(trusted_roots=team.trusted_roots)
     plugin = InvocationPlugin(team, alert)
-    tools.bind(gateway, plugin.proofs)
+    fleet_tools = tools.FleetTools(gateway, plugin.proofs)
     application = App(
         name=APP_NAME,
-        root_agent=build_root_agent(model),
+        root_agent=build_root_agent(model, fleet_tools),
         plugins=[plugin],
     )
     return application, team, plugin, gateway

@@ -48,3 +48,20 @@ def test_app_carries_the_holder_plugin() -> None:
 def test_sub_agent_is_reachable_by_transfer() -> None:
     names = [a.name for a in app.agent.root_agent.sub_agents]
     assert names == [app.agent.REMEDIATION_AGENT_NAME]
+
+
+def test_each_app_keeps_its_own_gateway() -> None:
+    first, _team1, _plugin1, gateway1 = app.agent.build_app("test-model")
+    second, _team2, _plugin2, gateway2 = app.agent.build_app("test-model")
+
+    first_tools = [
+        *first.root_agent.tools,
+        *first.root_agent.sub_agents[0].tools,
+    ]
+    second_tools = [
+        *second.root_agent.tools,
+        *second.root_agent.sub_agents[0].tools,
+    ]
+    assert all(tool.__self__.gateway is gateway1 for tool in first_tools)
+    assert all(tool.__self__.gateway is gateway2 for tool in second_tools)
+    assert gateway1 is not gateway2
