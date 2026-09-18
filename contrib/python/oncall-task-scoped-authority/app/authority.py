@@ -98,11 +98,15 @@ def grant_ticket(
     coordinator_key: SigningKey,
     remediation_key: SigningKey,
     service: str,
+    intent: str,
 ) -> Warrant:
-    """Narrow the role into a ticket for one service.
+    """Narrow the role into a terminal ticket for one service.
 
-    Raises `tenuo.exceptions.MonotonicityError` if the ticket would hold
-    anything the role does not.
+    A ticket that adds a tool, widens a pattern, or raises a ceiling is
+    refused with `tenuo.exceptions.MonotonicityError`. A TTL longer than
+    the role's remaining life is clamped to it. `terminal()` makes the
+    ticket the end of the chain: the holder cannot delegate it further.
+    `intent` is recorded in the ticket's delegation receipt.
     """
     return (
         role.grant_builder()
@@ -114,6 +118,8 @@ def grant_ticket(
         )
         .holder(remediation_key.public_key)
         .ttl(TICKET_TTL_SECONDS)
+        .intent(intent)
+        .terminal()
         .grant(coordinator_key)
     )
 
@@ -148,13 +154,16 @@ class OnCallAuthority:
             return None
         return [self.role, ticket]
 
-    def issue_ticket(self, service: str, session_id: str) -> list[Warrant]:
-        """Grant a ticket from the alert's service and remember it for this session."""
+    def issue_ticket(
+        self, service: str, session_id: str, intent: str = ""
+    ) -> list[Warrant]:
+        """Grant a ticket for the alert's service and remember it for this session."""
         ticket = grant_ticket(
             self.role,
             self.keys[COORDINATOR_AGENT_NAME],
             self.keys[REMEDIATION_AGENT_NAME],
             service,
+            intent or f"remediate {service}",
         )
         self._tickets[session_id] = ticket
         return [self.role, ticket]

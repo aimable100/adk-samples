@@ -120,7 +120,11 @@ class InvocationPlugin(BasePlugin):
 
     def grant_from_alert(self, session_id: str) -> list:
         """Create the ticket from the alert record for this session."""
-        return self._authority.issue_ticket(self._alert["service"], session_id)
+        return self._authority.issue_ticket(
+            self._alert["service"],
+            session_id,
+            intent=f"remediate {self._alert['id']} on {self._alert['service']}",
+        )
 
     async def before_tool_callback(
         self,

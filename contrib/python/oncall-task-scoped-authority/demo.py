@@ -58,6 +58,8 @@ from tenuo import (
 )
 from tenuo.exceptions import (
     ApprovalGateTriggered,
+    DepthExceeded,
+    ExpiredError,
     InvalidApproval,
     MonotonicityError,
     SignatureInvalid,
@@ -255,7 +257,14 @@ def main(argv: list[str] | None = None) -> int:
             team.key_for(REMEDIATION_AGENT_NAME).public_key_bytes()
         ).hex()
         _print_warrant("remediation ticket", tickets[-1], rem_hex)
-        print(f"      delegation receipt: {tickets[-1].delegation_receipt}")
+        receipt = tickets[-1].delegation_receipt
+        print(
+            f"      terminal: {tickets[-1].is_terminal()}  intent: {receipt.intent!r}"
+        )
+        print(
+            f"      delegation receipt: parent {receipt.parent_warrant_id[:20]}.. "
+            f"-> child {receipt.child_warrant_id[:20]}.."
+        )
     else:
         print("    (no ticket was granted)")
 
@@ -316,8 +325,31 @@ def main(argv: list[str] | None = None) -> int:
             replay_ok = True
             print(f"    {type(exc).__name__}: {exc}")
 
-    print("\n8. remediation agent tries to widen its own ticket")
+    print("\n8. coordinator tries to grant a ticket wider than its role")
     widen_ok = False
+    try:
+        (
+            team.role.grant_builder()
+            .capability(
+                "scale_service",
+                service=Exact(service),
+                replicas=Range(1.0, 50.0),
+            )
+            .holder(remediation_key.public_key)
+            .ttl(authority.TICKET_TTL_SECONDS)
+            .grant(team.key_for(ROOT_AGENT_NAME))
+        )
+        print("    granted (unexpected)")
+    except MonotonicityError as exc:
+        widen_ok = True
+        d = exc.details
+        print(
+            f"    MonotonicityError ({type(exc).__name__}): child "
+            f"{d.get('bound')} {d.get('child_value')} exceeds parent "
+            f"{d.get('bound')} {d.get('parent_value')}"
+        )
+    print("\n9. remediation agent tries to pass the ticket on")
+    pass_on_ok = False
     if ticket is not None:
         try:
             (
@@ -325,23 +357,18 @@ def main(argv: list[str] | None = None) -> int:
                 .capability(
                     "scale_service",
                     service=Exact(service),
-                    replicas=Range(1.0, 50.0),
+                    replicas=Range(1.0, 2.0),
                 )
-                .holder(remediation_key.public_key)
-                .ttl(authority.TICKET_TTL_SECONDS)
+                .holder(SigningKey.generate().public_key)
+                .ttl(60)
                 .grant(remediation_key)
             )
             print("    granted (unexpected)")
-        except MonotonicityError as exc:
-            widen_ok = True
-            d = exc.details
-            print(
-                f"    MonotonicityError ({type(exc).__name__}): child "
-                f"{d.get('bound')} {d.get('child_value')} exceeds parent "
-                f"{d.get('bound')} {d.get('parent_value')}"
-            )
+        except DepthExceeded as exc:
+            pass_on_ok = True
+            print(f"    {type(exc).__name__}: {exc}")
 
-    print("\n9. a warrant minted by a key the platform never issued")
+    print("\n10. a warrant minted by a key the platform never issued")
     rogue = SigningKey.generate()
     forged = (
         Warrant.mint_builder()
@@ -359,7 +386,29 @@ def main(argv: list[str] | None = None) -> int:
         forged_ok = True
         print(f"    {type(exc).__name__}: {exc}")
 
-    print("\n10. receipts: one signed record per gateway decision")
+    print("\n11. a ticket past its ten minutes (here: a one-second ticket)")
+    short = (
+        team.role.grant_builder()
+        .capability("read_logs", service=Exact(service))
+        .holder(remediation_key.public_key)
+        .ttl(1)
+        .grant(team.key_for(ROOT_AGENT_NAME))
+    )
+    time.sleep(2)
+    expiry_ok = False
+    try:
+        authorizer.check_chain(
+            [team.role, short],
+            "read_logs",
+            args,
+            short.sign(remediation_key, "read_logs", args, int(time.time())),
+        )
+        print("    ALLOWED (unexpected)")
+    except ExpiredError as exc:
+        expiry_ok = True
+        print(f"    {type(exc).__name__}: {exc}")
+
+    print("\n12. receipts: one signed record per gateway decision")
     gateway_key_hex = bytes(gateway.receipt_public_key.to_bytes()).hex()
     outcomes = []
     receipts_ok = bool(gateway.receipts)
@@ -381,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValidationError as exc:
         print(f"    tampered receipt -> {type(exc).__name__}")
 
-    print("\n11. above the ticket: the role allows it only with an approval")
+    print("\n13. above the ticket: the role allows it only with an approval")
     approval_ok = False
     coordinator_key = team.key_for(ROOT_AGENT_NAME)
     big = {"service": service, "replicas": 6}
@@ -431,6 +480,8 @@ def main(argv: list[str] | None = None) -> int:
         and replay_ok
         and widen_ok
         and forged_ok
+        and pass_on_ok
+        and expiry_ok
         and receipts_ok
         and approval_ok
         and all(not c.denied for c in calls if c.tool == "read_logs")

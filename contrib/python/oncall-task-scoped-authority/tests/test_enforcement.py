@@ -33,6 +33,9 @@ from tenuo import (
 )
 from tenuo.exceptions import (
     ApprovalGateTriggered,
+    DelegationAuthorityError,
+    DepthExceeded,
+    ExpiredError,
     InvalidApproval,
     MonotonicityError,
     SignatureInvalid,
@@ -251,31 +254,111 @@ def test_ticket_alone_does_not_verify_without_its_chain(team):
         )
 
 
-def test_widening_the_ticket_is_refused_at_grant_time(team):
-    ticket = team.issue_ticket(SERVICE, "s")[-1]
-    key = team.key_for(REMEDIATION_AGENT_NAME)
-
+def test_a_ticket_wider_than_the_role_is_refused_at_grant_time(team):
+    coordinator = team.key_for(ROOT_AGENT_NAME)
+    remediation = team.key_for(REMEDIATION_AGENT_NAME)
     with pytest.raises(MonotonicityError) as info:
         (
-            ticket.grant_builder()
+            team.role.grant_builder()
             .capability(
                 "scale_service",
                 service=Exact(SERVICE),
                 replicas=Range(1.0, 50.0),
             )
-            .holder(key.public_key)
+            .holder(remediation.public_key)
             .ttl(authority.TICKET_TTL_SECONDS)
-            .grant(key)
+            .grant(coordinator)
         )
     assert info.value.details["bound"] == "max"
-
     with pytest.raises(MonotonicityError):
         (
-            ticket.grant_builder()
-            .capability("restart_service", service=Exact(SERVICE))
-            .holder(key.public_key)
+            team.role.grant_builder()
+            .capability("delete_service", service=Exact(SERVICE))
+            .holder(remediation.public_key)
             .ttl(authority.TICKET_TTL_SECONDS)
+            .grant(coordinator)
+        )
+
+
+def test_the_ticket_is_terminal_and_names_its_intent(team):
+    ticket = team.issue_ticket(
+        SERVICE, "s", intent="remediate ALR-2291 on web-checkout"
+    )[-1]
+    assert ticket.is_terminal()
+    receipt = ticket.delegation_receipt
+    assert receipt.intent == "remediate ALR-2291 on web-checkout"
+    assert receipt.parent_warrant_id == team.role.id
+    assert receipt.child_warrant_id == ticket.id
+    key = team.key_for(REMEDIATION_AGENT_NAME)
+    with pytest.raises(DepthExceeded):
+        (
+            ticket.grant_builder()
+            .capability(
+                "scale_service",
+                service=Exact(SERVICE),
+                replicas=Range(1.0, 2.0),
+            )
+            .holder(SigningKey.generate().public_key)
+            .ttl(60)
             .grant(key)
+        )
+
+
+def test_a_wider_pattern_or_a_non_holder_grant_is_refused(team):
+    coordinator = team.key_for(ROOT_AGENT_NAME)
+    remediation = team.key_for(REMEDIATION_AGENT_NAME)
+    with pytest.raises(MonotonicityError):
+        (
+            team.role.grant_builder()
+            .capability(
+                "scale_service", service=Pattern("*"), replicas=Range(1.0, 4.0)
+            )
+            .holder(remediation.public_key)
+            .ttl(60)
+            .grant(coordinator)
+        )
+    with pytest.raises(DelegationAuthorityError):
+        (
+            team.role.grant_builder()
+            .capability(
+                "scale_service",
+                service=Exact(SERVICE),
+                replicas=Range(1.0, 4.0),
+            )
+            .holder(remediation.public_key)
+            .ttl(60)
+            .grant(SigningKey.generate())
+        )
+
+
+def test_a_longer_ttl_is_clamped_to_the_role(team):
+    ticket = (
+        team.role.grant_builder()
+        .capability("read_logs", service=Exact(SERVICE))
+        .holder(team.key_for(REMEDIATION_AGENT_NAME).public_key)
+        .ttl(authority.ROLE_TTL_SECONDS * 2)
+        .grant(team.key_for(ROOT_AGENT_NAME))
+    )
+    assert ticket.ttl_seconds() <= team.role.ttl_seconds()
+
+
+def test_an_expired_ticket_is_refused(team):
+    key = team.key_for(REMEDIATION_AGENT_NAME)
+    short = (
+        team.role.grant_builder()
+        .capability("read_logs", service=Exact(SERVICE))
+        .holder(key.public_key)
+        .ttl(1)
+        .grant(team.key_for(ROOT_AGENT_NAME))
+    )
+    time.sleep(2)
+    args = {"service": SERVICE}
+    with pytest.raises(ExpiredError):
+        Authorizer(trusted_roots=team.trusted_roots).check_chain(
+            [team.role, short],
+            "read_logs",
+            args,
+            short.sign(key, "read_logs", args, int(time.time())),
         )
 
 

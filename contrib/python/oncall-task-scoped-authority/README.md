@@ -44,7 +44,10 @@ standing role to the coordinator's key: read any logs; scale or restart
 `web-*` services between one and ten replicas; page the secondary
 on-call; hand off to the remediation agent. Scaling to five or more
 replicas is an approval gate. The platform's private key is discarded
-after minting; its public key is what the gateway trusts.
+after minting; its public key is what the gateway trusts. The
+coordinator never scales anything itself in this recipe. Its scale
+authority is the ceiling on what it may hand to the remediation agent,
+and the approval demonstration at the end uses it.
 
 **The alert** (`app/alert.py`). A record from the alerting system with
 the service name in it. The ticket is built from this record. The model
@@ -56,9 +59,14 @@ transfers. In ADK a transfer is a tool call, `transfer_to_agent`, so it
 passes through the same plugin callback as every other tool. The plugin
 checks that the role permits the transfer, then grants the ticket: the
 role narrowed to the alert's service, one to four replicas, ten minutes,
-bound to the remediation agent's key. The library refuses a ticket that
-holds anything the role does not. Until this moment the remediation
-agent has no authority.
+bound to the remediation agent's key, marked terminal, with the intent
+"remediate ALR-2291 on web-checkout" recorded in its delegation
+receipt. A ticket that adds a tool, widens a pattern, or raises a
+ceiling is refused at grant time; a TTL longer than the role's
+remaining life is clamped to it. Terminal means the ticket is the end
+of the chain: the remediation agent cannot delegate it to anyone,
+however narrowly. Until this moment the remediation agent has no
+authority.
 
 **Signed calls** (`app/plugin.py`, `app/tools.py`). For every fleet
 tool call the plugin signs the exact arguments ADK is about to pass,
@@ -68,25 +76,27 @@ the warrant chain, to the gateway. Proofs never touch session state.
 
 **Verification** (`app/gateway.py`). `FleetGateway` is constructed with
 the platform's public key and nothing else. `invoke` is the only code
-that changes replica counts. It verifies that the chain leads to the
-platform, that no link widened its parent, that nothing has expired,
-that the leaf permits this tool with these argument values, and that
-the signature was made by the leaf's holder. Then it runs the tool. On
-any failure it returns a refusal, which ADK hands to the model as the
-tool result, and the fleet is untouched. Without the plugin the tools
-present no proof and are refused.
+that changes replica counts. It verifies that the chain starts at the
+platform's key, that each link names the one before it, that nothing
+has expired, that the leaf permits this tool with these argument
+values, and that the signature was made by the leaf's holder. Then it
+runs the tool. On any failure it returns a refusal, which ADK hands to
+the model as the tool result, and the fleet is untouched. Without the
+plugin the tools present no proof and are refused.
 
 **Receipts** (`app/gateway.py`). The gateway signs a receipt for every
-decision with a key of its own. Anyone with the gateway's public key
-verifies a receipt later, offline. Tickets also carry a delegation
-receipt naming the parent they were narrowed from.
+decision with a key of its own and keeps the wire form.
+`tenuo_core.verify_receipt` checks the signature offline and returns
+the payload, including the signer's key, which the reader compares to
+the gateway's published key. Tickets also carry a delegation receipt
+naming the parent, the child, and the intent.
 
 **Approval above the ticket.** The role permits up to ten replicas, but
 five or more requires a signed approval from the SRE lead's key in
 addition to the holder's. The ticket stays at one to four, so the
 remediation agent is refused above four rather than held for approval.
-The gate is part of the warrant and is inherited by every ticket
-granted from the role.
+The gate is part of the warrant: a ticket granted with a ceiling above
+four would carry it.
 
 | Side | Object | Holds | Does |
 |---|---|---|---|
@@ -143,8 +153,8 @@ warnings on stderr first.
     Alert ALR-2291 (P2): web-checkout p99 latency 4.8s over 5m (threshold 1.5s). Service: web-checkout.
 
 2. standing role (no ticket yet)
-    coordinator role: key cac2fa1ad8db..
-      ttl 3600s, holder PublicKey(cac2fa1a...)
+    coordinator role: key db46cbba1485..
+      ttl 3600s, holder PublicKey(db46cbba...)
       page_oncall(reason=Wildcard())
       read_logs(service=Pattern('*'))
       restart_service(service=Pattern('web-*'))
@@ -153,11 +163,12 @@ warnings on stderr first.
     remediation_agent: no ticket (granted at transfer_to_agent, from the alert record)
 
 3. ticket granted at hand-off
-    remediation ticket: key 398b467a1e6b..
-      ttl 600s, holder PublicKey(398b467a...)
+    remediation ticket: key 0fbc07ebb543..
+      ttl 600s, holder PublicKey(0fbc07eb...)
       read_logs(service=Exact('web-checkout'))
       scale_service(replicas=Range(min=1.0, max=4.0), service=Exact('web-checkout'))
-      delegation receipt: DelegationReceipt(parent='tnu_wrt_01a0b6af1fb47e53a91ac25687c744ba', child='tnu_wrt_01a0b6af20747193a90bf7a275416697')
+      terminal: True  intent: 'remediate ALR-2291 on web-checkout'
+      delegation receipt: parent tnu_wrt_01a0b6b9134f.. -> child tnu_wrt_01a0b6b913bd..
 
 4. hand-off record
     [coordinator] ok     transfer_to_agent({'agent_name': 'remediation_agent'})
@@ -179,17 +190,23 @@ warnings on stderr first.
 7. leaked ticket, replayed with a different key
     SignatureInvalid: Signature verification failed: Proof-of-Possession verification failed
 
-8. remediation agent tries to widen its own ticket
-    MonotonicityError (RangeExpanded): child max 50 exceeds parent max 4
+8. coordinator tries to grant a ticket wider than its role
+    MonotonicityError (RangeExpanded): child max 50 exceeds parent max 10
 
-9. a warrant minted by a key the platform never issued
+9. remediation agent tries to pass the ticket on
+    DepthExceeded: Delegation depth 2 exceeds maximum 1
+
+10. a warrant minted by a key the platform never issued
     UntrustedRoot: Root warrant issuer is not trusted
 
-10. receipts: one signed record per gateway decision
-    6 receipts, all signed by gateway key f580133589d3..: ['allow:ok', 'allow:ok', 'allow:ok', 'deny:constraint_violation', 'deny:constraint_violation', 'deny:tool_not_authorized']
+11. a ticket past its ten minutes (here: a one-second ticket)
+    ExpiredError: Warrant 'tnu_wrt_01a0b6b913c87701bb77ba85a1cdfba0' has expired
+
+12. receipts: one signed record per gateway decision
+    6 receipts, all signed by gateway key 66ea524134b0..: ['allow:ok', 'allow:ok', 'allow:ok', 'deny:constraint_violation', 'deny:constraint_violation', 'deny:tool_not_authorized']
     tampered receipt -> ValidationError
 
-11. above the ticket: the role allows it only with an approval
+13. above the ticket: the role allows it only with an approval
     coordinator asks for 6 -> ApprovalGateTriggered: Approval required for tool 'scale_service'
     with sre-lead's signed approval -> {'service': 'web-checkout', 'replicas': 6, 'previous': 3}
     a stranger's approval -> InvalidApproval: Invalid approval: approver not in trusted set
@@ -202,13 +219,15 @@ hand-off, and the gateway's decisions. The fleet snapshot after section
 5 is the result: one service changed, by the amount the ticket allowed,
 nothing else moved.
 
-Sections 7 to 9 run outside the agent loop against the same verifier:
-a ticket copied to another key, a ticket widened by its holder, a
-warrant from an issuer the platform never trusted.
+Sections 7 to 11 run outside the agent loop against the same verifier
+and the same builders: a ticket replayed with another key, a ticket
+wider than the role, the remediation agent passing its ticket on, a
+warrant from an issuer the platform never trusted, and a ticket past
+its TTL.
 
-Section 10 verifies every receipt from the run offline, confirms the
+Section 12 verifies every receipt from the run offline, confirms the
 signer is the gateway's key, and shows that a receipt with eight
-characters changed fails. Section 11 is the approval gate: the
+characters changed fails. Section 13 is the approval gate: the
 coordinator asks for six replicas and is refused, the SRE lead signs an
 approval bound to that request, the same call executes, and an approval
 signed by anyone else is rejected.
@@ -260,7 +279,7 @@ process.
 | `app/tools.py` | ADK tool wrappers that present the proof to the gateway |
 | `app/agent.py` | The agent tree and `build_app()` |
 | `app/prompt.py` | Instructions for both agents |
-| `demo.py` | The scripted run and the checks in sections 7 to 11 |
+| `demo.py` | The scripted run and the checks in sections 7 to 13 |
 | `tests/` | Runnability and enforcement tests, offline |
 
 Checked against `google-adk` 2.9.1, `tenuo` 0.3.0, Python 3.11.
